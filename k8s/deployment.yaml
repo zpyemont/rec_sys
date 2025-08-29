@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranker-deployment
+  labels:
+    app: ranker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ranker
+  template:
+    metadata:
+      labels:
+        app: ranker
+    spec:
+      containers:
+      - name: ranker
+        image: gcr.io/PROJECT_ID/ranker:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8500
+        env:
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: ranker-secrets
+              key: redis_url
+        - name: POSTGRES_DSN
+          valueFrom:
+            secretKeyRef:
+              name: ranker-secrets
+              key: postgres_dsn
+        - name: BQ_PROJECT
+          valueFrom:
+            secretKeyRef:
+              name: ranker-secrets
+              key: bq_project
+        - name: BQ_DATASET
+          valueFrom:
+            secretKeyRef:
+              name: ranker-secrets
+              key: bq_dataset
+        - name: BQ_TABLE_PRODUCTS
+          value: "products"
+        - name: GCS_BUCKET_PRODUCTS
+          value: "looksy_shopify_parsed"
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8500
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8500
+          initialDelaySeconds: 10
+          periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranker-svc
+  labels:
+    app: ranker
+spec:
+  type: ClusterIP
+  selector:
+    app: ranker
+  ports:
+  - name: http
+    port: 8500
+    targetPort: 8500
