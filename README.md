@@ -9,20 +9,21 @@ A FastAPI-based ranker service that assembles diversified feeds from product can
 ## Requirements
 - Python 3.11
 - Postgres (Cloud SQL recommended)
-- Redis (for user shown-set)
+- Firestore (for user shown-set history)
 - Optional: BigQuery and GCS access
 
 ## Local Setup
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export REDIS_URL=redis://localhost:6379/0
 export POSTGRES_DSN="host=localhost port=5432 user=postgres password=postgres dbname=postgres"
 # Optional BigQuery/GCS
 export BQ_PROJECT=your-project
 export BQ_DATASET=your_dataset
 export BQ_TABLE_PRODUCTS=products
 export GCS_BUCKET_PRODUCTS=looksy_shopify_parsed
+# Firestore uses Application Default Credentials (ADC)
+# Ensure `gcloud auth application-default login` or service account on GKE
 uvicorn app.main:app --host 0.0.0.0 --port 8500
 ```
 
@@ -30,7 +31,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 8500
 ```bash
 docker build -t gcr.io/PROJECT_ID/ranker:latest .
 docker run -p 8500:8500 \
-  -e REDIS_URL=$REDIS_URL \
   -e POSTGRES_DSN="$POSTGRES_DSN" \
   -e BQ_PROJECT=$BQ_PROJECT \
   -e BQ_DATASET=$BQ_DATASET \
@@ -41,11 +41,13 @@ docker run -p 8500:8500 \
 
 ## Kubernetes (GKE)
 - Update `k8s/deployment.yaml` image to your registry
-- Create secrets `ranker-secrets` with keys: `redis_url`, `postgres_dsn`, `bq_project`, `bq_dataset`
+- Use Workload Identity or mount credentials for Firestore/BigQuery
+- Create secret for `postgres_dsn` and config for BQ dataset/project
 ```bash
 kubectl apply -f k8s/deployment.yaml
 ```
 
 ## Notes
 - The model function `predict()` in `app/ranker/model.py` is a stub (pass).
+- Firestore stores shown history under `user_feed_history/{user_id}/shown/{prod_id}`.
 - Candidate sources and freshness/features are placeholders; replace with your feature store and scoring.
