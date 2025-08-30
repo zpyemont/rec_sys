@@ -4,11 +4,11 @@ from typing import List, Dict, Any
 from .settings import get_settings
 from .schemas import FeedResponse, ProductItem
 
-# Connectors and ranker modules will be implemented in subsequent files
-from .connectors.redis_client import (
-    get_redis_client_safe,
-    add_shown_items_safe,
-    get_shown_set_safe,
+# Firestore for shown-set history
+from .connectors.firestore import (
+    get_firestore_client_safe,
+    add_shown_items_fs,
+    get_shown_set_fs,
 )
 from .connectors.postgres import PostgresClient
 from .ranker.candidate_sources import (
@@ -39,10 +39,10 @@ def healthz() -> Dict[str, str]:
 def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None), n: int | None = Query(None)) -> FeedResponse:
     final_feed_size = n or settings.feed_default_size
 
-    redis_client = get_redis_client_safe(settings)
+    fs_client = get_firestore_client_safe(settings)
     pg_client = PostgresClient.from_settings(settings)
 
-    shown_set = get_shown_set_safe(redis_client, user_id)
+    shown_set = get_shown_set_fs(fs_client, user_id)
 
     # Step 2: Assemble candidate pools (stubbed)
     popular_ids = query_popular_ids(pg_client, limit=5000)
@@ -94,7 +94,7 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
     final_ids = interleave_buckets(slices, final_feed_size)
 
     # Step 8: record shown
-    add_shown_items_safe(redis_client, user_id, final_ids)
+    add_shown_items_fs(fs_client, user_id, final_ids)
 
     # Hydrate metadata from Postgres when available
     hydrated: List[Dict[str, Any]] = join_product_metadata(pg_client, final_ids)
