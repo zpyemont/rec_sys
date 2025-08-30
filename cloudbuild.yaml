@@ -1,0 +1,46 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: europe-west1
+  _AR_REPO: rec-sys
+  _GKE_CLUSTER: rec-sys-cluster
+  _GKE_LOCATION: europe-west1
+  _CLOUD_SQL_INSTANCE: ""
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:latest
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:latest
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
+    entrypoint: bash
+    env:
+      - USE_GKE_GCLOUD_AUTH_PLUGIN=True
+    args:
+      - -ceu
+      - |
+        gcloud container clusters get-credentials "${_GKE_CLUSTER}" --region "${_GKE_LOCATION}" --project "${PROJECT_ID}"
+        IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}"
+        sed -e "s|gcr.io/PROJECT_ID/ranker:latest|${IMAGE}|g" \
+            -e "s|{{CLOUD_SQL_INSTANCE}}|${_CLOUD_SQL_INSTANCE}|g" \
+          k8s/deployment.yaml | kubectl apply -f -
+
+images:
+- ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}
+- ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:latest

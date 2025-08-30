@@ -14,6 +14,7 @@ spec:
       labels:
         app: ranker
     spec:
+      serviceAccountName: ranker-sa
       containers:
       - name: ranker
         image: gcr.io/PROJECT_ID/ranker:latest
@@ -21,11 +22,6 @@ spec:
         ports:
         - containerPort: 8500
         env:
-        - name: REDIS_URL
-          valueFrom:
-            secretKeyRef:
-              name: ranker-secrets
-              key: redis_url
         - name: POSTGRES_DSN
           valueFrom:
             secretKeyRef:
@@ -57,6 +53,17 @@ spec:
             port: 8500
           initialDelaySeconds: 10
           periodSeconds: 20
+      - name: cloud-sql-proxy
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.3
+        args:
+        - --structured-logs
+        - --address=127.0.0.1
+        - --port=5432
+        - {{CLOUD_SQL_INSTANCE}}
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+      # For Firestore/BigQuery auth, prefer Workload Identity; otherwise mount SA key
 ---
 apiVersion: v1
 kind: Service
