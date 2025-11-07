@@ -37,7 +37,7 @@ steps:
       - |
         gcloud container clusters get-credentials "${_GKE_CLUSTER}" --region "${_GKE_LOCATION}" --project "${PROJECT_ID}"
         IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}"
-        sed -e "s|gcr.io/PROJECT_ID/ranker:latest|${IMAGE}|g" \
+        sed -e "s|gcr.io/PROJECT_ID/ranker:latest|$$IMAGE|g" \
             -e "s|{{CLOUD_SQL_INSTANCE}}|${_CLOUD_SQL_INSTANCE}|g" \
           k8s/deployment.yaml | kubectl apply -f -
 
