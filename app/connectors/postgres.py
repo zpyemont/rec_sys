@@ -22,7 +22,7 @@ class PostgresClient:
             port = settings.pg_port or 5432
             user = settings.pg_user or "postgres"
             password = settings.pg_password or ""
-            database = settings.pg_database or "postgres"
+            database = settings.pg_database or "product"  # Default to 'product' database used by ingestion_pipeline
             dsn = f"host={host} port={port} user={user} password={password} dbname={database}"
         return cls(dsn)
 

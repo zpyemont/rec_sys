@@ -59,3 +59,4 @@ def add_shown_items_fs(fs_client: FirestoreClient | None, user_id: str, prod_ids
         batch.commit()
     except Exception:
         return
+

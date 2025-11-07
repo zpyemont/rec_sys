@@ -6,7 +6,7 @@ substitutions:
   _AR_REPO: rec-sys
   _GKE_CLUSTER: rec-sys-cluster
   _GKE_LOCATION: europe-west1
-  _CLOUD_SQL_INSTANCE: ""
+  _CLOUD_SQL_INSTANCE: "looksyuk:europe-west1:products"
 
 steps:
   - name: gcr.io/cloud-builders/docker
