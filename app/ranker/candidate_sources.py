@@ -25,11 +25,33 @@ def fetch_features_for_ids(prod_ids: List[str]) -> Dict[str, Any]:
     return {str(pid): {} for pid in prod_ids}
 
 
-def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> List[Dict[str, Any]]:
+def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, dict]:
+    """
+    Fetch full product metadata and return as dict keyed by product_id.
+    Maps PostgreSQL schema to frontend-expected format.
+    """
     settings = get_settings()
     rows = pg.get_product_metadata_for_ids(prod_ids)
-    if rows:
-        return rows
+
+    result = {}
+    for row in rows:
+        result[row["product_id"]] = {
+            "id": row["product_id"],  # Rename product_id to id
+            "title": row.get("title"),
+            "price": float(row["price"]) if row.get("price") else None,
+            "images": row.get("images") or [],  # Ensure it's an array
+            "category": row.get("category"),
+            "like_count": row.get("like_count", 0),
+            "description": row.get("description"),
+            "url": row.get("url"),
+            "brand": row.get("brand"),
+            "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+            "currency": row.get("currency"),
+            "availability": row.get("availability")
+        }
+
+    if result:
+        return result
 
     # Fallback to BigQuery if configured
     try:
@@ -37,13 +59,28 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> List[Dict[
 
         if settings.bq_dataset and settings.bq_table_products:
             bq = BigQueryClient.from_settings(settings)
-            return bq.get_product_metadata_for_ids(
+            bq_rows = bq.get_product_metadata_for_ids(
                 dataset=settings.bq_dataset,
                 table=settings.bq_table_products,
                 prod_ids=prod_ids,
             )
+            # Map BigQuery results to same format
+            for row in bq_rows:
+                result[row["product_id"]] = {
+                    "id": row["product_id"],
+                    "title": row.get("title"),
+                    "price": float(row["price"]) if row.get("price") else None,
+                    "images": row.get("images") or [],
+                    "category": row.get("category"),
+                    "like_count": row.get("like_count", 0),
+                    "description": row.get("description"),
+                    "url": row.get("url"),
+                    "brand": row.get("brand"),
+                    "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                    "currency": row.get("currency"),
+                    "availability": row.get("availability")
+                }
     except Exception:
         pass
 
-    # Minimal fallback: return IDs only
-    return [{"prod_id": str(pid), "title": None, "price": None, "image_url": None} for pid in prod_ids]
+    return result

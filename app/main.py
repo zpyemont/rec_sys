@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from typing import List, Dict, Any
 
 from .settings import get_settings
-from .schemas import FeedResponse, ProductItem
+from .schemas import FeedResponse, ProductItem, LikeRequest, LikeResponse
 
 # Firestore for shown-set history
 from .connectors.firestore import (
@@ -33,6 +33,85 @@ settings = get_settings()
 @app.get("/healthz")
 def healthz() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+def record_user_like_firestore(fs_client, user_id: str, product_id: str, liked: bool):
+    """
+    Record or remove user like in Firestore.
+    Path: /users/{user_id}/likes/product_{product_id}
+    """
+    if not fs_client:
+        return
+
+    from google.cloud import firestore as fs
+
+    doc_ref = fs_client.collection("users").document(user_id).collection("likes").document(f"product_{product_id}")
+
+    if liked:
+        # Add like
+        doc_ref.set({
+            "type": "product",
+            "created_at": fs.SERVER_TIMESTAMP
+        })
+    else:
+        # Remove like
+        doc_ref.delete()
+
+
+@app.post("/like", response_model=LikeResponse)
+def like_product(request: LikeRequest) -> LikeResponse:
+    """
+    Like a product: increments like_count in PostgreSQL and records in Firestore.
+    """
+    try:
+        pg_client = PostgresClient.from_settings(settings)
+
+        # Increment like count in PostgreSQL
+        new_like_count = pg_client.increment_like_count(request.product_id)
+
+        # Record like in Firestore
+        fs_client = get_firestore_client_safe(settings)
+        record_user_like_firestore(fs_client, request.user_id, request.product_id, liked=True)
+
+        return LikeResponse(
+            success=True,
+            like_count=new_like_count,
+            message="Product liked successfully"
+        )
+    except Exception as e:
+        return LikeResponse(
+            success=False,
+            like_count=0,
+            message=f"Error liking product: {str(e)}"
+        )
+
+
+@app.post("/unlike", response_model=LikeResponse)
+def unlike_product(request: LikeRequest) -> LikeResponse:
+    """
+    Unlike a product: decrements like_count in PostgreSQL and removes from Firestore.
+    """
+    try:
+        pg_client = PostgresClient.from_settings(settings)
+
+        # Decrement like count in PostgreSQL
+        new_like_count = pg_client.decrement_like_count(request.product_id)
+
+        # Remove like from Firestore
+        fs_client = get_firestore_client_safe(settings)
+        record_user_like_firestore(fs_client, request.user_id, request.product_id, liked=False)
+
+        return LikeResponse(
+            success=True,
+            like_count=new_like_count,
+            message="Product unliked successfully"
+        )
+    except Exception as e:
+        return LikeResponse(
+            success=False,
+            like_count=0,
+            message=f"Error unliking product: {str(e)}"
+        )
 
 
 @app.get("/get_diverse_feed", response_model=FeedResponse)
@@ -97,16 +176,26 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
     add_shown_items_fs(fs_client, user_id, final_ids)
 
     # Hydrate metadata from Postgres when available
-    hydrated: List[Dict[str, Any]] = join_product_metadata(pg_client, final_ids)
+    product_metadata: Dict[str, dict] = join_product_metadata(pg_client, final_ids)
 
+    # Build feed response with full product details
     items = [
         ProductItem(
-            prod_id=str(item.get("prod_id")),
-            image_url=item.get("image_url"),
-            price=float(item.get("price")) if item.get("price") is not None else None,
-            title=item.get("title"),
+            id=pid,
+            title=meta.get("title"),
+            price=meta.get("price"),
+            images=meta.get("images", []),
+            category=meta.get("category"),
+            like_count=meta.get("like_count", 0),
+            description=meta.get("description"),
+            url=meta.get("url"),
+            brand=meta.get("brand"),
+            created_at=meta.get("created_at"),
+            currency=meta.get("currency"),
+            availability=meta.get("availability")
         )
-        for item in hydrated
+        for pid in final_ids
+        if (meta := product_metadata.get(pid))
     ]
 
     return FeedResponse(feed=items)

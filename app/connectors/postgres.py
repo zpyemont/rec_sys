@@ -74,24 +74,57 @@ class PostgresClient:
         return self.fetch_val_list(sql, (cat, cat, limit))
 
     def get_product_metadata_for_ids(self, prod_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        Fetch full product metadata for given product IDs.
+        Returns: List of dicts with all product fields needed by frontend.
+        """
         if not prod_ids:
             return []
         # Use ANY with array param to avoid SQL injection if list is large
         sql = (
-            "SELECT product_id as prod_id, title, price, images FROM products "
-            "WHERE product_id = ANY(%s)"
+            "SELECT product_id, title, price, images, category, like_count, "
+            "description, url, brand, created_at, currency, availability "
+            "FROM products WHERE product_id = ANY(%s)"
         )
         rows = self.fetch_all(sql, (prod_ids,))
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            images = r.get("images") or []
-            image_url = images[0] if isinstance(images, list) and images else None
-            out.append(
-                {
-                    "prod_id": str(r.get("prod_id")),
-                    "title": r.get("title"),
-                    "price": float(r.get("price")) if r.get("price") is not None else None,
-                    "image_url": image_url,
-                }
-            )
-        return out
+        return rows
+
+    def increment_like_count(self, product_id: str) -> int:
+        """
+        Increment like count for a product and return new count.
+        """
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE products
+                    SET like_count = like_count + 1,
+                        updated_at = NOW()
+                    WHERE product_id = %s
+                    RETURNING like_count
+                    """,
+                    (product_id,)
+                )
+                result = cur.fetchone()
+                conn.commit()
+                return result[0] if result else 0
+
+    def decrement_like_count(self, product_id: str) -> int:
+        """
+        Decrement like count for a product (min 0) and return new count.
+        """
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE products
+                    SET like_count = GREATEST(like_count - 1, 0),
+                        updated_at = NOW()
+                    WHERE product_id = %s
+                    RETURNING like_count
+                    """,
+                    (product_id,)
+                )
+                result = cur.fetchone()
+                conn.commit()
+                return result[0] if result else 0
