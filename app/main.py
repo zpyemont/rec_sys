@@ -150,7 +150,7 @@ def get_liked_products(user_id: str = Query(...)) -> FeedResponse:
             raise HTTPException(status_code=500, detail="Firestore not available")
 
         # Fetch user's likes from Firestore
-        likes_ref = fs_client.collection("users").document(user_id).collection("likes")
+        likes_ref = fs_client.client.collection("users").document(user_id).collection("likes")
         likes_docs = likes_ref.stream()
 
         # Extract product IDs from likes (filter for product likes only)
@@ -211,7 +211,7 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
             raise HTTPException(status_code=500, detail="Firestore not available")
 
         # Fetch user's collections from Firestore
-        collections_ref = fs_client.collection("users").document(user_id).collection("collections")
+        collections_ref = fs_client.client.collection("users").document(user_id).collection("collections")
         collections_docs = collections_ref.stream()
 
         collections_list = []
