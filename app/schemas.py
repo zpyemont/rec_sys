@@ -32,3 +32,17 @@ class LikeResponse(BaseModel):
     success: bool
     like_count: int
     message: Optional[str] = None
+
+
+# Collection schemas
+class CollectionItem(BaseModel):
+    id: str
+    name: str
+    created_at: str  # ISO string
+    updated_at: str  # ISO string
+    product_count: int
+    products: List[ProductItem] = []  # Products in the collection
+
+
+class CollectionsResponse(BaseModel):
+    collections: List[CollectionItem]

@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from typing import List, Dict, Any
 
 from .settings import get_settings
-from .schemas import FeedResponse, ProductItem, LikeRequest, LikeResponse
+from .schemas import FeedResponse, ProductItem, LikeRequest, LikeResponse, CollectionItem, CollectionsResponse
 
 # Firestore for shown-set history
 from .connectors.firestore import (
@@ -130,6 +130,147 @@ def unlike_product(request: LikeRequest) -> LikeResponse:
             like_count=0,
             message=f"Error unliking product: {str(e)}"
         )
+
+
+@app.get("/liked-products", response_model=FeedResponse)
+def get_liked_products(user_id: str = Query(...)) -> FeedResponse:
+    """
+    Get all liked products for a user.
+    Fetches likes from Firestore and joins with PostgreSQL product data.
+    """
+    # Block anonymous users
+    if user_id == "anonymous":
+        return FeedResponse(feed=[])
+
+    try:
+        fs_client = get_firestore_client_safe(settings)
+        pg_client = PostgresClient.from_settings(settings)
+
+        if not fs_client:
+            raise HTTPException(status_code=500, detail="Firestore not available")
+
+        # Fetch user's likes from Firestore
+        likes_ref = fs_client.collection("users").document(user_id).collection("likes")
+        likes_docs = likes_ref.stream()
+
+        # Extract product IDs from likes (filter for product likes only)
+        product_ids = []
+        for doc in likes_docs:
+            data = doc.data()
+            if data and data.get("type") == "product" and doc.id.startswith("product_"):
+                product_id = doc.id.replace("product_", "")
+                product_ids.append(product_id)
+
+        if not product_ids:
+            return FeedResponse(feed=[])
+
+        # Join with PostgreSQL to get full product metadata
+        product_metadata: Dict[str, dict] = join_product_metadata(pg_client, product_ids)
+
+        # Build response with full product details
+        items = [
+            ProductItem(
+                id=pid,
+                title=meta.get("title"),
+                price=meta.get("price"),
+                images=meta.get("images", []),
+                category=meta.get("category"),
+                like_count=meta.get("like_count", 0),
+                description=meta.get("description"),
+                url=meta.get("url"),
+                brand=meta.get("brand"),
+                created_at=meta.get("created_at"),
+                currency=meta.get("currency"),
+                availability=meta.get("availability")
+            )
+            for pid in product_ids
+            if (meta := product_metadata.get(pid))
+        ]
+
+        return FeedResponse(feed=items)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching liked products: {str(e)}")
+
+
+@app.get("/collections", response_model=CollectionsResponse)
+def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
+    """
+    Get all collections for a user with their products.
+    Fetches collections from Firestore and joins products with PostgreSQL.
+    """
+    # Block anonymous users
+    if user_id == "anonymous":
+        return CollectionsResponse(collections=[])
+
+    try:
+        fs_client = get_firestore_client_safe(settings)
+        pg_client = PostgresClient.from_settings(settings)
+
+        if not fs_client:
+            raise HTTPException(status_code=500, detail="Firestore not available")
+
+        # Fetch user's collections from Firestore
+        collections_ref = fs_client.collection("users").document(user_id).collection("collections")
+        collections_docs = collections_ref.stream()
+
+        collections_list = []
+
+        for coll_doc in collections_docs:
+            coll_data = coll_doc.data()
+            if not coll_data:
+                continue
+
+            collection_id = coll_doc.id
+
+            # Fetch products in this collection
+            products_ref = collections_ref.document(collection_id).collection("collection_products")
+            products_docs = products_ref.stream()
+
+            # Extract product IDs
+            product_ids = [pdoc.data().get("product_id") for pdoc in products_docs if pdoc.data()]
+
+            # Join with PostgreSQL to get full product metadata
+            product_metadata: Dict[str, dict] = join_product_metadata(pg_client, product_ids) if product_ids else {}
+
+            # Build product items
+            products = [
+                ProductItem(
+                    id=pid,
+                    title=meta.get("title"),
+                    price=meta.get("price"),
+                    images=meta.get("images", []),
+                    category=meta.get("category"),
+                    like_count=meta.get("like_count", 0),
+                    description=meta.get("description"),
+                    url=meta.get("url"),
+                    brand=meta.get("brand"),
+                    created_at=meta.get("created_at"),
+                    currency=meta.get("currency"),
+                    availability=meta.get("availability")
+                )
+                for pid in product_ids
+                if (meta := product_metadata.get(pid))
+            ]
+
+            # Convert Firestore timestamps to ISO strings
+            created_at_str = coll_data.get("created_at").isoformat() if coll_data.get("created_at") else ""
+            updated_at_str = coll_data.get("updated_at").isoformat() if coll_data.get("updated_at") else ""
+
+            collection_item = CollectionItem(
+                id=collection_id,
+                name=coll_data.get("name", "Untitled"),
+                created_at=created_at_str,
+                updated_at=updated_at_str,
+                product_count=coll_data.get("product_count", 0),
+                products=products
+            )
+            collections_list.append(collection_item)
+
+        return CollectionsResponse(collections=collections_list)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching collections: {str(e)}")
 
 
 @app.get("/get_diverse_feed", response_model=FeedResponse)
