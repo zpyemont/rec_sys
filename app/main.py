@@ -254,8 +254,30 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
             ]
 
             # Convert Firestore timestamps to ISO strings
-            created_at_str = coll_data.get("created_at").isoformat() if coll_data.get("created_at") else ""
-            updated_at_str = coll_data.get("updated_at").isoformat() if coll_data.get("updated_at") else ""
+            created_at = coll_data.get("created_at")
+            updated_at = coll_data.get("updated_at")
+
+            # Handle Firestore timestamp conversion
+            if created_at:
+                # Firestore timestamps might be datetime objects or need conversion
+                if hasattr(created_at, 'isoformat'):
+                    created_at_str = created_at.isoformat()
+                elif hasattr(created_at, 'ToDatetime'):
+                    created_at_str = created_at.ToDatetime().isoformat()
+                else:
+                    created_at_str = str(created_at)
+            else:
+                created_at_str = ""
+
+            if updated_at:
+                if hasattr(updated_at, 'isoformat'):
+                    updated_at_str = updated_at.isoformat()
+                elif hasattr(updated_at, 'ToDatetime'):
+                    updated_at_str = updated_at.ToDatetime().isoformat()
+                else:
+                    updated_at_str = str(updated_at)
+            else:
+                updated_at_str = ""
 
             collection_item = CollectionItem(
                 id=collection_id,
