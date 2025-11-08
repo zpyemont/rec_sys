@@ -45,7 +45,7 @@ def record_user_like_firestore(fs_client, user_id: str, product_id: str, liked: 
 
     from google.cloud import firestore as fs
 
-    doc_ref = fs_client.collection("users").document(user_id).collection("likes").document(f"product_{product_id}")
+    doc_ref = fs_client.client.collection("users").document(user_id).collection("likes").document(f"product_{product_id}")
 
     if liked:
         # Add like
