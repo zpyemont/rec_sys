@@ -62,7 +62,16 @@ def record_user_like_firestore(fs_client, user_id: str, product_id: str, liked: 
 def like_product(request: LikeRequest) -> LikeResponse:
     """
     Like a product: increments like_count in PostgreSQL and records in Firestore.
+    Anonymous users are not allowed to like products.
     """
+    # Block anonymous users from liking
+    if request.user_id == "anonymous":
+        return LikeResponse(
+            success=False,
+            like_count=0,
+            message="You must be logged in to like products"
+        )
+
     try:
         pg_client = PostgresClient.from_settings(settings)
 
@@ -90,7 +99,16 @@ def like_product(request: LikeRequest) -> LikeResponse:
 def unlike_product(request: LikeRequest) -> LikeResponse:
     """
     Unlike a product: decrements like_count in PostgreSQL and removes from Firestore.
+    Anonymous users are not allowed to unlike products.
     """
+    # Block anonymous users from unliking
+    if request.user_id == "anonymous":
+        return LikeResponse(
+            success=False,
+            like_count=0,
+            message="You must be logged in to unlike products"
+        )
+
     try:
         pg_client = PostgresClient.from_settings(settings)
 
@@ -121,7 +139,9 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
     fs_client = get_firestore_client_safe(settings)
     pg_client = PostgresClient.from_settings(settings)
 
-    shown_set = get_shown_set_fs(fs_client, user_id)
+    # Skip Firestore tracking for anonymous users
+    is_anonymous = user_id == "anonymous"
+    shown_set = set() if is_anonymous else get_shown_set_fs(fs_client, user_id)
 
     # Step 2: Assemble candidate pools (stubbed)
     popular_ids = query_popular_ids(pg_client, limit=5000)
@@ -172,8 +192,9 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
     # Step 7.3: interleave
     final_ids = interleave_buckets(slices, final_feed_size)
 
-    # Step 8: record shown
-    add_shown_items_fs(fs_client, user_id, final_ids)
+    # Step 8: record shown (skip for anonymous users)
+    if not is_anonymous:
+        add_shown_items_fs(fs_client, user_id, final_ids)
 
     # Hydrate metadata from Postgres when available
     product_metadata: Dict[str, dict] = join_product_metadata(pg_client, final_ids)
