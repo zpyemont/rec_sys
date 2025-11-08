@@ -225,16 +225,15 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
 
             collection_id = coll_doc.id
 
-            # Fetch products in this collection
-            products_ref = collections_ref.document(collection_id).collection("collection_products")
+            # Fetch products in this collection (items subcollection)
+            products_ref = collections_ref.document(collection_id).collection("items")
             products_docs = products_ref.stream()
 
-            # Extract product IDs
+            # Extract product IDs (document IDs are the product IDs)
             product_ids = []
             for pdoc in products_docs:
-                pdata = pdoc.to_dict() if hasattr(pdoc, 'to_dict') else {}
-                if pdata and pdata.get("product_id"):
-                    product_ids.append(pdata.get("product_id"))
+                # In the frontend, the document ID IS the product ID
+                product_ids.append(pdoc.id)
 
             # Join with PostgreSQL to get full product metadata
             product_metadata: Dict[str, dict] = join_product_metadata(pg_client, product_ids) if product_ids else {}
