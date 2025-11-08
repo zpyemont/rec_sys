@@ -156,7 +156,8 @@ def get_liked_products(user_id: str = Query(...)) -> FeedResponse:
         # Extract product IDs from likes (filter for product likes only)
         product_ids = []
         for doc in likes_docs:
-            data = doc.data()
+            # DocumentSnapshot has .to_dict() method
+            data = doc.to_dict() if hasattr(doc, 'to_dict') else {}
             if data and data.get("type") == "product" and doc.id.startswith("product_"):
                 product_id = doc.id.replace("product_", "")
                 product_ids.append(product_id)
@@ -217,7 +218,8 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
         collections_list = []
 
         for coll_doc in collections_docs:
-            coll_data = coll_doc.data()
+            # DocumentSnapshot has .to_dict() method
+            coll_data = coll_doc.to_dict() if hasattr(coll_doc, 'to_dict') else {}
             if not coll_data:
                 continue
 
@@ -228,7 +230,11 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
             products_docs = products_ref.stream()
 
             # Extract product IDs
-            product_ids = [pdoc.data().get("product_id") for pdoc in products_docs if pdoc.data()]
+            product_ids = []
+            for pdoc in products_docs:
+                pdata = pdoc.to_dict() if hasattr(pdoc, 'to_dict') else {}
+                if pdata and pdata.get("product_id"):
+                    product_ids.append(pdata.get("product_id"))
 
             # Join with PostgreSQL to get full product metadata
             product_metadata: Dict[str, dict] = join_product_metadata(pg_client, product_ids) if product_ids else {}
