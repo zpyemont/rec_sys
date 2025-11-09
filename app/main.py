@@ -1,8 +1,19 @@
 from fastapi import FastAPI, Query, HTTPException
 from typing import List, Dict, Any
+import time
+import logging
 
 from .settings import get_settings
-from .schemas import FeedResponse, ProductItem, LikeRequest, LikeResponse, CollectionItem, CollectionsResponse
+from .schemas import (
+    FeedResponse,
+    ProductItem,
+    LikeRequest,
+    LikeResponse,
+    CollectionItem,
+    CollectionsResponse,
+    TrackRequest,
+    TrackResponse,
+)
 
 # Firestore for shown-set history
 from .connectors.firestore import (
@@ -11,6 +22,8 @@ from .connectors.firestore import (
     get_shown_set_fs,
 )
 from .connectors.postgres import PostgresClient
+from .connectors.kafka import get_kafka_producer
+from .connectors.tfs_client import get_monolith_client
 from .ranker.candidate_sources import (
     query_popular_ids,
     query_recent_ids,
@@ -25,6 +38,9 @@ from .ranker.diversifier import (
     filter_seen_pairs,
 )
 from .ranker.model import score_with_model_or_fallback
+from .utils import generate_request_id
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Ranker Service", version="0.1.0")
 settings = get_settings()
@@ -304,6 +320,10 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
 def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None), n: int | None = Query(None)) -> FeedResponse:
     final_feed_size = n or settings.feed_default_size
 
+    # Generate unique request ID for this recommendation request
+    request_id = generate_request_id(worker_id=settings.worker_id)
+    event_time = int(time.time() * 1000)
+
     fs_client = get_firestore_client_safe(settings)
     pg_client = PostgresClient.from_settings(settings)
 
@@ -311,18 +331,71 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
     is_anonymous = user_id == "anonymous"
     shown_set = set() if is_anonymous else get_shown_set_fs(fs_client, user_id)
 
-    # Step 2: Assemble candidate pools (stubbed)
+    # Step 2: Assemble candidate pools
     popular_ids = query_popular_ids(pg_client, limit=5000)
     recent_ids = query_recent_ids(pg_client, hours=24, limit=1000)
     candidates_raw = list(dict.fromkeys(popular_ids + recent_ids))
 
     candidates_unseen = [pid for pid in candidates_raw if pid not in shown_set]
 
-    # Batch features for scoring (stub)
-    features = fetch_features_for_ids(candidates_unseen)
+    # Step 3: Score candidates with Monolith (if enabled)
+    if settings.monolith_enabled and not is_anonymous and candidates_unseen:
+        try:
+            # Limit candidates to top 500 for efficiency
+            candidates_to_score = candidates_unseen[:500]
 
-    # Mock model scores with fallback
-    personal_scores = score_with_model_or_fallback(features, fallback_scores=None)
+            # Call Monolith for predictions
+            monolith_client = get_monolith_client(settings)
+            user_emb, product_embs, scores = monolith_client.predict(
+                user_id=user_id,
+                product_ids=candidates_to_score
+            )
+
+            # Publish FeatureEvent to Kafka (if enabled)
+            if settings.kafka_enabled:
+                try:
+                    kafka_producer = get_kafka_producer(settings)
+
+                    # Build feature data
+                    feature_data = {
+                        "user_id": user_id,
+                        "user_embedding": user_emb.tolist(),
+                        "context": {
+                            "session_position": 1,  # TODO: Track from session
+                            "hour_of_day": time.localtime().tm_hour,
+                            "day_of_week": time.localtime().tm_wday,
+                            "device": device or "unknown"
+                        },
+                        "candidates": [
+                            {
+                                "product_id": pid,
+                                "product_embedding": product_embs[pid].tolist(),
+                                "monolith_score": scores[pid],
+                                "position": i
+                            }
+                            for i, pid in enumerate(list(scores.keys())[:20])  # Top 20
+                        ]
+                    }
+
+                    kafka_producer.publish_feature_event(request_id, event_time, feature_data)
+                    logger.info(f"Published FeatureEvent for request_id={request_id}")
+                except Exception as e:
+                    logger.error(f"Failed to publish FeatureEvent: {e}")
+
+            # Use Monolith scores
+            personal_scores = scores
+            logger.info(f"Monolith predictions successful: {len(personal_scores)} products scored")
+
+        except Exception as e:
+            logger.error(f"Monolith prediction failed: {e}, falling back to stub scoring")
+            # Fallback to existing logic
+            features = fetch_features_for_ids(candidates_unseen)
+            personal_scores = score_with_model_or_fallback(features, fallback_scores=None)
+    else:
+        # Use existing fallback scoring (Monolith disabled or anonymous user)
+        features = fetch_features_for_ids(candidates_unseen)
+        personal_scores = score_with_model_or_fallback(features, fallback_scores=None)
+
     personalized_sorted = sorted(personal_scores.items(), key=lambda x: x[1], reverse=True)
 
     # Category/style diversification bucket (stubbed)
@@ -388,3 +461,65 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
     ]
 
     return FeedResponse(feed=items)
+
+
+@app.post("/track", response_model=TrackResponse)
+def track_interaction(request: TrackRequest) -> TrackResponse:
+    """
+    Track user interaction and publish ActionEvent to Kafka
+
+    This endpoint receives user interaction events (swipes, likes, etc.)
+    and publishes them to Kafka for joining with FeatureEvents
+    """
+    # Ignore anonymous users
+    if request.user_id == "anonymous":
+        return TrackResponse(
+            status="ignored",
+            request_id=request.request_id,
+            message="Anonymous users not tracked"
+        )
+
+    # Only publish if Kafka is enabled
+    if not settings.kafka_enabled:
+        return TrackResponse(
+            status="skipped",
+            request_id=request.request_id,
+            message="Kafka publishing disabled"
+        )
+
+    event_time = int(time.time() * 1000)
+
+    # Determine label (1.0 for positive actions, 0.0 for negative)
+    positive_actions = {"swipe_up", "like", "collection_add", "shop_now"}
+    label = 1.0 if request.action in positive_actions else 0.0
+
+    action_data = {
+        "user_id": request.user_id,
+        "product_id": request.product_id,
+        "action": request.action,
+        "dwell_time": request.dwell_time,
+        "images_viewed": request.images_viewed,
+        "position": request.position,
+        "label": label
+    }
+
+    try:
+        kafka_producer = get_kafka_producer(settings)
+        kafka_producer.publish_action_event(request.request_id, event_time, action_data)
+
+        logger.info(
+            f"Published ActionEvent: request_id={request.request_id}, "
+            f"user={request.user_id}, product={request.product_id}, action={request.action}"
+        )
+
+        return TrackResponse(
+            status="tracked",
+            request_id=request.request_id,
+            message="Interaction tracked successfully"
+        )
+    except Exception as e:
+        logger.error(f"Failed to publish ActionEvent: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to track interaction: {str(e)}"
+        )

@@ -46,3 +46,20 @@ class CollectionItem(BaseModel):
 
 class CollectionsResponse(BaseModel):
     collections: List[CollectionItem]
+
+
+# Tracking schemas
+class TrackRequest(BaseModel):
+    request_id: int
+    user_id: str
+    product_id: str
+    action: str  # "swipe_up", "swipe_down", "like", "collection_add", "shop_now"
+    dwell_time: float
+    images_viewed: int
+    position: int
+
+
+class TrackResponse(BaseModel):
+    status: str
+    request_id: int
+    message: Optional[str] = None

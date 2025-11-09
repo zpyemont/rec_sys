@@ -9,3 +9,6 @@ google-cloud-storage==2.17.0
 google-cloud-firestore==2.17.0
 python-dotenv==1.0.1
 numpy==2.0.1
+confluent-kafka==2.3.0
+tensorflow-serving-api==2.11.0
+grpcio==1.59.0

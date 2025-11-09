@@ -36,6 +36,22 @@ class Settings(BaseSettings):
 
     bucket_ratios: BucketRatios = BucketRatios()
 
+    # Kafka (Confluent Cloud)
+    kafka_bootstrap_servers: str = "pkc-619z3.us-east1.gcp.confluent.cloud:9092"
+    kafka_api_key: str = "DGCM2ZPZ5T2ZUKFE"
+    kafka_api_secret: str = ""  # Set via environment variable
+    kafka_enabled: bool = False  # Feature flag to enable Kafka publishing
+
+    # Monolith TensorFlow Serving
+    monolith_host: str = "localhost"
+    monolith_port: int = 8500
+    monolith_model_name: str = "fashion_ranking"
+    monolith_timeout: float = 5.0
+    monolith_enabled: bool = False  # Feature flag to enable Monolith integration
+
+    # Worker ID for request ID generation (for distributed deployments)
+    worker_id: int = 1
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
