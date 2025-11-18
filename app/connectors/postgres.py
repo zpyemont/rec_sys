@@ -142,7 +142,7 @@ class PostgresClient:
         # Use ANY with array param to avoid SQL injection if list is large
         sql = (
             "SELECT product_id, title, price, images, category, like_count, "
-            "description, url, brand, created_at, currency, availability "
+            "description, url, brand, created_at, currency, availability, image_has_text "
             "FROM products WHERE product_id = ANY(%s)"
         )
         rows = self.fetch_all(sql, (prod_ids,))
