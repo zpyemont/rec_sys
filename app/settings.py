@@ -36,6 +36,33 @@ class Settings(BaseSettings):
 
     bucket_ratios: BucketRatios = BucketRatios()
 
+    # Infinite scroll & personalization settings
+    shown_set_ttl_days: int = 30           # Reset shown items after 30 days
+    tier_1_pool_size: int = 5000           # New users (0-100 shown)
+    tier_2_pool_size: int = 15000          # Engaged users (100-500 shown)
+    tier_3_pool_size: int = 50000          # Power users (500-2000 shown)
+
+    # Category adjacency for exploration (related categories)
+    category_adjacency: dict = {
+        # Women's fashion
+        'dresses': ['jumpsuits', 'skirts', 'rompers', 'tops'],
+        'tops': ['dresses', 't-shirts', 'blouses', 'sweaters'],
+        'jeans': ['pants', 'shorts', 'skirts'],
+        'sneakers': ['athletic shoes', 'boots', 'sandals', 'flats'],
+        'jackets': ['coats', 'blazers', 'sweaters', 'hoodies'],
+        'skirts': ['dresses', 'shorts', 'pants'],
+        'sweaters': ['hoodies', 'jackets', 'cardigans', 'tops'],
+
+        # Men's fashion
+        'shirts': ['t-shirts', 'polos', 'sweaters', 'button-downs'],
+        'pants': ['jeans', 'shorts', 'chinos'],
+        't-shirts': ['shirts', 'polos', 'tank tops'],
+
+        # Accessories
+        'bags': ['backpacks', 'purses', 'totes', 'clutches'],
+        'jewelry': ['necklaces', 'bracelets', 'earrings', 'rings'],
+    }
+
     # Kafka (Confluent Cloud)
     kafka_bootstrap_servers: str = "pkc-619z3.us-east1.gcp.confluent.cloud:9092"
     kafka_api_key: str = "DGCM2ZPZ5T2ZUKFE"
@@ -51,6 +78,16 @@ class Settings(BaseSettings):
 
     # Worker ID for request ID generation (for distributed deployments)
     worker_id: int = 1
+
+    # Stock filtering - filter out products with these availability values
+    filter_out_of_stock: bool = True  # Feature flag to enable stock filtering
+    excluded_availability_values: list[str] = [
+        "out of stock",
+        "sold out",
+        "unavailable",
+        "out_of_stock",
+        "soldout"
+    ]
 
     class Config:
         env_file = ".env"

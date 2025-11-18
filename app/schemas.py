@@ -20,6 +20,14 @@ class ProductItem(BaseModel):
 
 class FeedResponse(BaseModel):
     feed: List[ProductItem]
+    request_id: Optional[int] = None  # For tracking interactions in recommendation pipeline
+
+    # Pagination metadata
+    has_more: bool = True              # Are there more products available?
+    unseen_count: Optional[int] = None # Products in current candidate pool
+    shown_count: Optional[int] = None  # Total items user has seen
+    total_count: Optional[int] = None  # Total products in catalog
+    tier: Optional[int] = None         # Which tier user is in (1-4)
 
 
 # New schemas for like/unlike endpoints

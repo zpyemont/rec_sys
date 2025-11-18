@@ -31,6 +31,7 @@ from .ranker.candidate_sources import (
     fetch_freshness_metrics,
     fetch_features_for_ids,
     join_product_metadata,
+    get_dynamic_personalized_pool,
 )
 from .ranker.diversifier import (
     slice_buckets_by_ratio,
@@ -329,14 +330,39 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
 
     # Skip Firestore tracking for anonymous users
     is_anonymous = user_id == "anonymous"
-    shown_set = set() if is_anonymous else get_shown_set_fs(fs_client, user_id)
+    shown_set = set() if is_anonymous else get_shown_set_fs(fs_client, user_id, ttl_days=settings.shown_set_ttl_days)
+    shown_count = len(shown_set)
 
-    # Step 2: Assemble candidate pools
-    popular_ids = query_popular_ids(pg_client, limit=5000)
-    recent_ids = query_recent_ids(pg_client, hours=24, limit=1000)
-    candidates_raw = list(dict.fromkeys(popular_ids + recent_ids))
+    # Get total catalog size
+    total_products = pg_client.get_total_product_count()
 
+    # Generate dynamic personalized candidate pool
+    candidates_raw = get_dynamic_personalized_pool(
+        pg_client,
+        fs_client,
+        user_id,
+        shown_set,
+        shown_count,
+        is_anonymous,
+        settings
+    )
+
+    # Filter to unseen candidates
     candidates_unseen = [pid for pid in candidates_raw if pid not in shown_set]
+
+    # Calculate pagination metadata
+    has_more = len(candidates_unseen) > final_feed_size
+    unseen_count = len(candidates_unseen)
+
+    # Determine tier
+    if shown_count < 100:
+        tier = 1
+    elif shown_count < 500:
+        tier = 2
+    elif shown_count < 2000:
+        tier = 3
+    else:
+        tier = 4
 
     # Step 3: Score candidates with Monolith (if enabled)
     if settings.monolith_enabled and not is_anonymous and candidates_unseen:
@@ -460,7 +486,15 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
         if (meta := product_metadata.get(pid))
     ]
 
-    return FeedResponse(feed=items)
+    return FeedResponse(
+        feed=items,
+        request_id=request_id,
+        has_more=has_more,
+        unseen_count=unseen_count,
+        shown_count=shown_count,
+        total_count=total_products,
+        tier=tier
+    )
 
 
 @app.post("/track", response_model=TrackResponse)
