@@ -8,6 +8,7 @@ class ProductItem(BaseModel):
     title: Optional[str] = None
     price: Optional[float] = None
     images: Optional[List[str]] = None  # Changed from image_url (single) to images (array)
+    image_has_text: Optional[List[bool]] = None  # CLIP classifier results per image
     category: Optional[str] = None
     like_count: int = 0
     description: Optional[str] = None

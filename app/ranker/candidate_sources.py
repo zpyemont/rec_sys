@@ -278,6 +278,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
             "title": row.get("title"),
             "price": float(row["price"]) if row.get("price") else None,
             "images": row.get("images") or [],  # Ensure it's an array
+            "image_has_text": row.get("image_has_text"),  # CLIP text detection results
             "category": row.get("category"),
             "like_count": row.get("like_count", 0),
             "description": row.get("description"),
@@ -309,6 +310,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
                     "title": row.get("title"),
                     "price": float(row["price"]) if row.get("price") else None,
                     "images": row.get("images") or [],
+                    "image_has_text": row.get("image_has_text"),  # CLIP text detection results
                     "category": row.get("category"),
                     "like_count": row.get("like_count", 0),
                     "description": row.get("description"),
