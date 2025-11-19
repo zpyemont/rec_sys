@@ -263,6 +263,24 @@ def get_dynamic_personalized_pool(
     return final
 
 
+def _parse_pg_boolean_array(value) -> List[bool] | None:
+    """
+    Parse PostgreSQL boolean array string to Python list.
+    e.g., "{f,t,t}" -> [False, True, True]
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return value  # Already a list
+    if isinstance(value, str):
+        # Remove curly braces and split by comma
+        value = value.strip('{}')
+        if not value:
+            return []
+        return [item.strip().lower() == 't' for item in value.split(',')]
+    return None
+
+
 def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, dict]:
     """
     Fetch full product metadata and return as dict keyed by product_id.
@@ -278,7 +296,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
             "title": row.get("title"),
             "price": float(row["price"]) if row.get("price") else None,
             "images": row.get("images") or [],  # Ensure it's an array
-            "image_has_text": row.get("image_has_text"),  # CLIP text detection results
+            "image_has_text": _parse_pg_boolean_array(row.get("image_has_text")),  # Parse PostgreSQL boolean array
             "category": row.get("category"),
             "like_count": row.get("like_count", 0),
             "description": row.get("description"),
@@ -310,7 +328,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
                     "title": row.get("title"),
                     "price": float(row["price"]) if row.get("price") else None,
                     "images": row.get("images") or [],
-                    "image_has_text": row.get("image_has_text"),  # CLIP text detection results
+                    "image_has_text": _parse_pg_boolean_array(row.get("image_has_text")),  # Parse boolean array
                     "category": row.get("category"),
                     "like_count": row.get("like_count", 0),
                     "description": row.get("description"),
