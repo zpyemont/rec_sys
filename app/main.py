@@ -473,6 +473,7 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
             title=meta.get("title"),
             price=meta.get("price"),
             images=meta.get("images", []),
+            image_has_text=meta.get("image_has_text"),
             category=meta.get("category"),
             like_count=meta.get("like_count", 0),
             description=meta.get("description"),
