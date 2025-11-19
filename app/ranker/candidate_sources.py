@@ -268,16 +268,27 @@ def _parse_pg_boolean_array(value) -> List[bool] | None:
     Parse PostgreSQL boolean array string to Python list.
     e.g., "{f,t,t}" -> [False, True, True]
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"_parse_pg_boolean_array called with value: {value}, type: {type(value)}")
+
     if value is None:
+        logger.info("Value is None, returning None")
         return None
     if isinstance(value, list):
+        logger.info(f"Value is already a list: {value}")
         return value  # Already a list
     if isinstance(value, str):
+        logger.info(f"Value is a string, parsing: {value}")
         # Remove curly braces and split by comma
         value = value.strip('{}')
         if not value:
             return []
-        return [item.strip().lower() == 't' for item in value.split(',')]
+        result = [item.strip().lower() == 't' for item in value.split(',')]
+        logger.info(f"Parsed result: {result}")
+        return result
+    logger.warning(f"Unexpected type for image_has_text: {type(value)}")
     return None
 
 
@@ -286,11 +297,17 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
     Fetch full product metadata and return as dict keyed by product_id.
     Maps PostgreSQL schema to frontend-expected format.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     settings = get_settings()
     rows = pg.get_product_metadata_for_ids(prod_ids)
 
+    logger.info(f"join_product_metadata: Processing {len(rows)} rows")
+
     result = {}
     for row in rows:
+        logger.info(f"Raw row image_has_text for {row['product_id']}: {row.get('image_has_text')}, type: {type(row.get('image_has_text'))}")
         result[row["product_id"]] = {
             "id": row["product_id"],  # Rename product_id to id
             "title": row.get("title"),

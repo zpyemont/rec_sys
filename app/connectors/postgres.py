@@ -137,6 +137,9 @@ class PostgresClient:
         Fetch full product metadata for given product IDs.
         Returns: List of dicts with all product fields needed by frontend.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
         if not prod_ids:
             return []
         # Use ANY with array param to avoid SQL injection if list is large
@@ -146,6 +149,13 @@ class PostgresClient:
             "FROM products WHERE product_id = ANY(%s)"
         )
         rows = self.fetch_all(sql, (prod_ids,))
+
+        # Log first row to debug
+        if rows:
+            logger.info(f"PostgreSQL returned {len(rows)} rows")
+            logger.info(f"First row keys: {rows[0].keys()}")
+            logger.info(f"First row image_has_text: {rows[0].get('image_has_text')}, type: {type(rows[0].get('image_has_text'))}")
+
         return rows
 
     def increment_like_count(self, product_id: str) -> int:
