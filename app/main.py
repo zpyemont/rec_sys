@@ -320,7 +320,12 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
 
 
 @app.get("/get_diverse_feed", response_model=FeedResponse)
-def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None), n: int | None = Query(None)) -> FeedResponse:
+def get_diverse_feed(
+    user_id: str = Query(...),
+    device: str | None = Query(None),
+    n: int | None = Query(None),
+    exclude_ids: str | None = Query(None)
+) -> FeedResponse:
     final_feed_size = n or settings.feed_default_size
 
     # Generate unique request ID for this recommendation request
@@ -332,7 +337,20 @@ def get_diverse_feed(user_id: str = Query(...), device: str | None = Query(None)
 
     # Skip Firestore tracking for anonymous users
     is_anonymous = user_id == "anonymous"
-    shown_set = set() if is_anonymous else get_shown_set_fs(fs_client, user_id, ttl_days=settings.shown_set_ttl_days)
+
+    # Parse client-side exclude_ids (for anonymous users or supplemental filtering)
+    client_shown_set = set()
+    if exclude_ids:
+        try:
+            client_shown_set = set(exclude_ids.split(','))
+        except Exception as e:
+            logger.warning(f"Failed to parse exclude_ids: {e}")
+
+    # Get server-side shown set (empty for anonymous users)
+    server_shown_set = set() if is_anonymous else get_shown_set_fs(fs_client, user_id, ttl_days=settings.shown_set_ttl_days)
+
+    # Merge client and server shown sets
+    shown_set = client_shown_set | server_shown_set
     shown_count = len(shown_set)
 
     # Get total catalog size
