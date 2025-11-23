@@ -51,23 +51,28 @@ class PostgresClient:
 
     def _build_stock_filter_clause(self) -> tuple[str, list[str]]:
         """
-        Build a SQL WHERE clause to filter out out-of-stock products.
+        Build a SQL WHERE clause to filter out out-of-stock and inactive products.
         Returns: (where_clause, params) tuple
         """
-        if not self._settings or not self._settings.filter_out_of_stock:
+        clauses = []
+        params = []
+
+        # ALWAYS filter inactive products (staleness tracking)
+        clauses.append("is_active = true")
+
+        # Optionally filter out-of-stock products
+        if self._settings and self._settings.filter_out_of_stock:
+            excluded_values = self._settings.excluded_availability_values
+            if excluded_values:
+                placeholders = ", ".join(["%s"] * len(excluded_values))
+                clauses.append(f"(availability IS NULL OR LOWER(availability) NOT IN ({placeholders}))")
+                params.extend([v.lower() for v in excluded_values])
+
+        if clauses:
+            where_clause = " AND ".join(clauses)
+            return (where_clause, params)
+        else:
             return ("", [])
-
-        excluded_values = self._settings.excluded_availability_values
-        if not excluded_values:
-            return ("", [])
-
-        # Build clause: (availability IS NULL OR LOWER(availability) NOT IN (...))
-        placeholders = ", ".join(["%s"] * len(excluded_values))
-        where_clause = f"(availability IS NULL OR LOWER(availability) NOT IN ({placeholders}))"
-        # Lowercase the excluded values for case-insensitive comparison
-        params = [v.lower() for v in excluded_values]
-
-        return (where_clause, params)
 
     # Specific helpers against products table
     def get_recent_products(self, hours: int, limit: int) -> List[str]:
@@ -143,10 +148,12 @@ class PostgresClient:
         if not prod_ids:
             return []
         # Use ANY with array param to avoid SQL injection if list is large
+        # Filter inactive products to prevent showing stale/delisted items
         sql = (
             "SELECT product_id, title, price, images, category, like_count, "
             "description, url, brand, created_at, currency, availability, image_has_text "
-            "FROM products WHERE product_id = ANY(%s)"
+            "FROM products "
+            "WHERE product_id = ANY(%s) AND is_active = true"
         )
         rows = self.fetch_all(sql, (prod_ids,))
 
