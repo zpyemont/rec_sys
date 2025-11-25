@@ -10,6 +10,7 @@ class ProductItem(BaseModel):
     images: Optional[List[str]] = None  # Changed from image_url (single) to images (array)
     image_has_text: Optional[List[bool]] = None  # CLIP classifier results per image
     category: Optional[str] = None
+    subcategory: Optional[str] = None  # Specific subcategory for hierarchical categorization
     like_count: int = 0
     description: Optional[str] = None
     url: Optional[str] = None  # Product page URL (formerly affiliateUrl)

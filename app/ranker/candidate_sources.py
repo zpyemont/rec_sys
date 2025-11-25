@@ -74,8 +74,14 @@ def get_user_behavioral_profile(fs_client, pg: PostgresClient, user_id: str) -> 
     # Get metadata for liked products
     liked_metadata = pg.get_product_metadata_for_ids(liked_product_ids)
 
-    # Extract preferences
-    categories = [m['category'] for m in liked_metadata if m.get('category')]
+    # Extract preferences - prioritize subcategory over category
+    categories = []
+    for m in liked_metadata:
+        if m.get('subcategory'):
+            categories.append(m['subcategory'])
+        elif m.get('category'):
+            categories.append(m['category'])
+
     brands = [m['brand'] for m in liked_metadata if m.get('brand')]
     prices = [float(m['price']) for m in liked_metadata if m.get('price') and m['price']]
 
@@ -315,6 +321,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
             "images": row.get("images") or [],  # Ensure it's an array
             "image_has_text": _parse_pg_boolean_array(row.get("image_has_text")),  # Parse PostgreSQL boolean array
             "category": row.get("category"),
+            "subcategory": row.get("subcategory"),
             "like_count": row.get("like_count", 0),
             "description": row.get("description"),
             "url": row.get("url"),
@@ -347,6 +354,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
                     "images": row.get("images") or [],
                     "image_has_text": _parse_pg_boolean_array(row.get("image_has_text")),  # Parse boolean array
                     "category": row.get("category"),
+                    "subcategory": row.get("subcategory"),
                     "like_count": row.get("like_count", 0),
                     "description": row.get("description"),
                     "url": row.get("url"),

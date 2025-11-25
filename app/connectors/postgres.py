@@ -225,54 +225,75 @@ class PostgresClient:
         price_range: Optional[Dict],
         limit: int
     ) -> List[str]:
-        """Get products in specific categories, optionally filtered by price"""
+        """
+        Get products in specific categories, optionally filtered by price.
+
+        Supports both hierarchical (subcategory) and flat (category) matching:
+        - Match subcategory first for precise results
+        - Fall back to category for products without subcategory
+        """
         if not categories:
             return []
 
         stock_filter, stock_params = self._build_stock_filter_clause()
+
+        # Convert categories to lowercase for fallback matching
+        categories_lower = [cat.lower() for cat in categories]
 
         if price_range and price_range.get('min') and price_range.get('max'):
             if stock_filter:
                 sql = f"""
                     SELECT product_id
                     FROM products
-                    WHERE category = ANY(%s)
+                    WHERE (
+                        subcategory = ANY(%s)
+                        OR LOWER(category) = ANY(%s)
+                    )
                       AND price BETWEEN %s AND %s
                       AND {stock_filter}
                     ORDER BY like_count DESC, updated_at DESC
                     LIMIT %s
                 """
-                params = [categories, price_range['min'], price_range['max']] + stock_params + [limit]
+                params = [categories, categories_lower, price_range['min'], price_range['max']] + stock_params + [limit]
             else:
                 sql = """
                     SELECT product_id
                     FROM products
-                    WHERE category = ANY(%s)
+                    WHERE (
+                        subcategory = ANY(%s)
+                        OR LOWER(category) = ANY(%s)
+                    )
                       AND price BETWEEN %s AND %s
                     ORDER BY like_count DESC, updated_at DESC
                     LIMIT %s
                 """
-                params = [categories, price_range['min'], price_range['max'], limit]
+                params = [categories, categories_lower, price_range['min'], price_range['max'], limit]
         else:
             if stock_filter:
                 sql = f"""
                     SELECT product_id
                     FROM products
-                    WHERE category = ANY(%s)
+                    WHERE (
+                        subcategory = ANY(%s)
+                        OR LOWER(category) = ANY(%s)
+                    )
                       AND {stock_filter}
                     ORDER BY like_count DESC, updated_at DESC
                     LIMIT %s
                 """
-                params = [categories] + stock_params + [limit]
+                params = [categories, categories_lower] + stock_params + [limit]
             else:
                 sql = """
                     SELECT product_id
                     FROM products
-                    WHERE category = ANY(%s)
+                    WHERE (
+                        subcategory = ANY(%s)
+                        OR LOWER(category) = ANY(%s)
+                    )
                     ORDER BY like_count DESC, updated_at DESC
                     LIMIT %s
                 """
-                params = [categories, limit]
+                params = [categories, categories_lower, limit]
 
         return self.fetch_val_list(sql, params)
 
@@ -342,39 +363,58 @@ class PostgresClient:
         """
         Get products in categories RELATED to user's preferences.
         Uses category_adjacency map to find related categories.
+
+        Supports both hierarchical (subcategory) and flat (category) matching:
+        - Prefer subcategory for precise matching
+        - Fall back to category for products without subcategory
         """
         if not user_categories:
             return []
 
-        # Find adjacent categories
+        # Find adjacent categories from the adjacency map
         adjacent = []
         for cat in user_categories:
-            adjacent.extend(category_adjacency.get(cat.lower(), []))
+            # Try exact match first (case-sensitive for new subcategories)
+            if cat in category_adjacency:
+                adjacent.extend(category_adjacency[cat])
+            # Fall back to lowercase for backward compatibility
+            elif cat.lower() in category_adjacency:
+                adjacent.extend(category_adjacency[cat.lower()])
 
         if not adjacent:
             return []
 
         stock_filter, stock_params = self._build_stock_filter_clause()
 
+        # Query both subcategory and category fields for best coverage
         if stock_filter:
             sql = f"""
                 SELECT product_id
                 FROM products
-                WHERE LOWER(category) = ANY(%s)
+                WHERE (
+                    subcategory = ANY(%s)
+                    OR LOWER(category) = ANY(%s)
+                )
                   AND {stock_filter}
                 ORDER BY like_count DESC, updated_at DESC
                 LIMIT %s
             """
-            params = [adjacent] + stock_params + [limit]
+            # Convert adjacent to lowercase for category fallback
+            adjacent_lower = [adj.lower() for adj in adjacent]
+            params = [adjacent, adjacent_lower] + stock_params + [limit]
         else:
             sql = """
                 SELECT product_id
                 FROM products
-                WHERE LOWER(category) = ANY(%s)
+                WHERE (
+                    subcategory = ANY(%s)
+                    OR LOWER(category) = ANY(%s)
+                )
                 ORDER BY like_count DESC, updated_at DESC
                 LIMIT %s
             """
-            params = [adjacent, limit]
+            adjacent_lower = [adj.lower() for adj in adjacent]
+            params = [adjacent, adjacent_lower, limit]
 
         return self.fetch_val_list(sql, params)
 
