@@ -150,7 +150,7 @@ class PostgresClient:
         # Use ANY with array param to avoid SQL injection if list is large
         # Filter inactive products to prevent showing stale/delisted items
         sql = (
-            "SELECT product_id, title, price, images, category, like_count, "
+            "SELECT product_id, title, price, compare_at_price, images, category, like_count, "
             "description, url, brand, created_at, currency, availability, image_has_text "
             "FROM products "
             "WHERE product_id = ANY(%s) AND is_active = true"

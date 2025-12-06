@@ -318,6 +318,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
             "id": row["product_id"],  # Rename product_id to id
             "title": row.get("title"),
             "price": float(row["price"]) if row.get("price") else None,
+            "compare_at_price": float(row["compare_at_price"]) if row.get("compare_at_price") else None,
             "images": row.get("images") or [],  # Ensure it's an array
             "image_has_text": _parse_pg_boolean_array(row.get("image_has_text")),  # Parse PostgreSQL boolean array
             "category": row.get("category"),
@@ -351,6 +352,7 @@ def join_product_metadata(pg: PostgresClient, prod_ids: List[str]) -> Dict[str, 
                     "id": row["product_id"],
                     "title": row.get("title"),
                     "price": float(row["price"]) if row.get("price") else None,
+                    "compare_at_price": float(row["compare_at_price"]) if row.get("compare_at_price") else None,
                     "images": row.get("images") or [],
                     "image_has_text": _parse_pg_boolean_array(row.get("image_has_text")),  # Parse boolean array
                     "category": row.get("category"),
