@@ -154,10 +154,18 @@ def get_dynamic_personalized_pool(
     # ═══════════════════════════════════════════════════════════
     fresh_limit = int(pool_size * 0.30)
     try:
-        fresh_candidates = pg.get_recent_products(
-            hours=48,
-            limit=fresh_limit
-        )
+        # Use diverse query for anonymous users to prevent brand domination
+        if is_anonymous:
+            fresh_candidates = pg.get_recent_products_diverse(
+                hours=48,
+                limit=fresh_limit,
+                max_per_brand=10
+            )
+        else:
+            fresh_candidates = pg.get_recent_products(
+                hours=48,
+                limit=fresh_limit
+            )
         all_candidates.extend([('fresh', pid) for pid in fresh_candidates])
         logger.info(f"✨ Added {len(fresh_candidates)} fresh products (ALL categories)")
     except Exception as e:
@@ -255,7 +263,14 @@ def get_dynamic_personalized_pool(
     # If pool is too small, fill with popular
     if len(final) < 1000:
         try:
-            popular_candidates = pg.get_popular_products(limit=pool_size)
+            # Use diverse query for anonymous users to prevent brand domination
+            if is_anonymous:
+                popular_candidates = pg.get_popular_products_diverse(
+                    limit=pool_size,
+                    max_per_brand=10
+                )
+            else:
+                popular_candidates = pg.get_popular_products(limit=pool_size)
             for pid in popular_candidates:
                 if pid not in seen and pid not in shown_set:
                     seen.add(pid)

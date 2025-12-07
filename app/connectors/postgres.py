@@ -96,6 +96,45 @@ class PostgresClient:
 
         return self.fetch_val_list(sql, params)
 
+    def get_recent_products_diverse(self, hours: int, limit: int, max_per_brand: int = 5) -> List[str]:
+        """
+        Get recent products with brand diversity using round-robin sampling.
+        Returns up to max_per_brand products from each brand, interleaved.
+        """
+        stock_filter, stock_params = self._build_stock_filter_clause()
+
+        if stock_filter:
+            sql = f"""
+                WITH ranked AS (
+                    SELECT product_id, brand,
+                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY parsed_at DESC) as rn
+                    FROM products
+                    WHERE parsed_at >= NOW() - INTERVAL '%s hours'
+                      AND {stock_filter}
+                )
+                SELECT product_id FROM ranked
+                WHERE rn <= %s
+                ORDER BY rn, brand
+                LIMIT %s
+            """
+            params = [hours] + stock_params + [max_per_brand, limit]
+        else:
+            sql = """
+                WITH ranked AS (
+                    SELECT product_id, brand,
+                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY parsed_at DESC) as rn
+                    FROM products
+                    WHERE parsed_at >= NOW() - INTERVAL '%s hours'
+                )
+                SELECT product_id FROM ranked
+                WHERE rn <= %s
+                ORDER BY rn, brand
+                LIMIT %s
+            """
+            params = [hours, max_per_brand, limit]
+
+        return self.fetch_val_list(sql, params)
+
     def get_popular_products(self, limit: int) -> List[str]:
         # Placeholder popularity = latest updated_at
         stock_filter, stock_params = self._build_stock_filter_clause()
@@ -113,6 +152,43 @@ class PostgresClient:
                 "ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST LIMIT %s"
             )
             params = [limit]
+
+        return self.fetch_val_list(sql, params)
+
+    def get_popular_products_diverse(self, limit: int, max_per_brand: int = 5) -> List[str]:
+        """
+        Get popular products with brand diversity using round-robin sampling.
+        Returns up to max_per_brand products from each brand, interleaved by popularity rank.
+        """
+        stock_filter, stock_params = self._build_stock_filter_clause()
+
+        if stock_filter:
+            sql = f"""
+                WITH ranked AS (
+                    SELECT product_id, brand,
+                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
+                    FROM products
+                    WHERE {stock_filter}
+                )
+                SELECT product_id FROM ranked
+                WHERE rn <= %s
+                ORDER BY rn, brand
+                LIMIT %s
+            """
+            params = stock_params + [max_per_brand, limit]
+        else:
+            sql = """
+                WITH ranked AS (
+                    SELECT product_id, brand,
+                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
+                    FROM products
+                )
+                SELECT product_id FROM ranked
+                WHERE rn <= %s
+                ORDER BY rn, brand
+                LIMIT %s
+            """
+            params = [max_per_brand, limit]
 
         return self.fetch_val_list(sql, params)
 
