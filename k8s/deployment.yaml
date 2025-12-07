@@ -5,7 +5,12 @@ metadata:
   labels:
     app: ranker
 spec:
-  replicas: 2
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: ranker
@@ -17,10 +22,17 @@ spec:
       serviceAccountName: ranker-sa
       containers:
       - name: ranker
-        image: gcr.io/PROJECT_ID/ranker:latest
+        image: europe-west1-docker.pkg.dev/looksyuk/containers/ranker:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8500
+        resources:
+          requests:
+            cpu: 400m
+            memory: 2Gi
+          limits:
+            cpu: 500m
+            memory: 2Gi
         env:
         - name: POSTGRES_DSN
           valueFrom:
@@ -59,7 +71,14 @@ spec:
         - --structured-logs
         - --address=127.0.0.1
         - --port=5432
-        - {{CLOUD_SQL_INSTANCE}}
+        - looksyuk:europe-west1:products
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: 200m
+            memory: 512Mi
         securityContext:
           runAsNonRoot: true
           allowPrivilegeEscalation: false
@@ -71,6 +90,8 @@ metadata:
   name: ranker-svc
   labels:
     app: ranker
+  annotations:
+    cloud.google.com/backend-config: '{"default": "ranker-backend-config"}'
 spec:
   type: ClusterIP
   selector:
