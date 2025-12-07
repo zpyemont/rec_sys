@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
-from collections import deque
+from typing import Dict, List, Optional, Tuple
+from collections import Counter, deque
 
 
 def filter_seen_pairs(bucket_list: List[Tuple[str, float]], shown_set: set[str]) -> List[Tuple[str, float]]:
@@ -38,7 +38,11 @@ def slice_buckets_by_ratio(
     }
 
 
-def interleave_buckets(slices: Dict[str, List[str]], final_feed_size: int) -> List[str]:
+def interleave_buckets(
+    slices: Dict[str, List[str]],
+    final_feed_size: int,
+    brand_map: Optional[Dict[str, Optional[str]]] = None
+) -> List[str]:
     queues = {
         "personal": deque(slices.get("personal", [])),
         "category": deque(slices.get("category", [])),
@@ -79,4 +83,86 @@ def interleave_buckets(slices: Dict[str, List[str]], final_feed_size: int) -> Li
         if len(unique_final) == final_feed_size:
             break
 
+    # Apply brand diversity if brand_map provided
+    if brand_map:
+        unique_final = enforce_brand_diversity(unique_final, brand_map)
+
     return unique_final
+
+
+def enforce_brand_diversity(
+    feed: List[str],
+    brand_map: Dict[str, Optional[str]],
+    max_consecutive: int = 2,
+    window_size: int = 10,
+    max_per_window: int = 3
+) -> List[str]:
+    """
+    Reorder feed to prevent brand clustering.
+
+    Args:
+        feed: List of product IDs in current order
+        brand_map: Mapping of product_id -> brand (None if unknown)
+        max_consecutive: Max same-brand products allowed in a row
+        window_size: Sliding window size for diversity check
+        max_per_window: Max same-brand products allowed in any window
+
+    Returns:
+        Reordered feed with brand diversity enforced
+    """
+    if not feed or not brand_map:
+        return feed
+
+    result: List[str] = []
+    remaining = deque(feed)
+    deferred: List[str] = []
+
+    while remaining:
+        found = False
+        # Try each remaining item to find one that satisfies diversity
+        for _ in range(len(remaining)):
+            pid = remaining.popleft()
+            brand = brand_map.get(pid)
+
+            # Products without brand always pass
+            if brand is None:
+                result.append(pid)
+                found = True
+                break
+
+            # Check consecutive constraint
+            consecutive_count = 0
+            for i in range(len(result) - 1, -1, -1):
+                prev_brand = brand_map.get(result[i])
+                if prev_brand == brand:
+                    consecutive_count += 1
+                else:
+                    break
+
+            if consecutive_count >= max_consecutive:
+                remaining.append(pid)  # Put back at end
+                continue
+
+            # Check window constraint
+            window_start = max(0, len(result) - window_size + 1)
+            window = result[window_start:]
+            window_brands = [brand_map.get(p) for p in window]
+            brand_count = sum(1 for b in window_brands if b == brand)
+
+            if brand_count >= max_per_window:
+                remaining.append(pid)  # Put back at end
+                continue
+
+            # Passes both constraints
+            result.append(pid)
+            found = True
+            break
+
+        if not found and remaining:
+            # No item satisfies constraints, take first available to avoid infinite loop
+            deferred.append(remaining.popleft())
+
+    # Append deferred items at the end
+    result.extend(deferred)
+
+    return result

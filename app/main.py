@@ -480,15 +480,25 @@ def get_diverse_feed(
         ratios=settings.bucket_ratios,
     )
 
-    # Step 7.3: interleave
-    final_ids = interleave_buckets(slices, final_feed_size)
+    # Collect all candidate IDs from slices for metadata fetch
+    all_slice_ids = (
+        slices.get("personal", []) +
+        slices.get("category", []) +
+        slices.get("fresh", [])
+    )
+
+    # Hydrate metadata from Postgres (needed for brand diversity)
+    product_metadata: Dict[str, dict] = join_product_metadata(pg_client, all_slice_ids)
+
+    # Build brand map for diversity enforcement
+    brand_map = {pid: meta.get("brand") for pid, meta in product_metadata.items()}
+
+    # Step 7.3: interleave with brand diversity
+    final_ids = interleave_buckets(slices, final_feed_size, brand_map=brand_map)
 
     # Step 8: record shown (skip for anonymous users)
     if not is_anonymous:
         add_shown_items_fs(fs_client, user_id, final_ids)
-
-    # Hydrate metadata from Postgres when available
-    product_metadata: Dict[str, dict] = join_product_metadata(pg_client, final_ids)
 
     # Build feed response with full product details
     items = [
