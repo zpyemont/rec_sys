@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import time
 import logging
@@ -45,6 +46,20 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Ranker Service", version="0.1.0")
 settings = get_settings()
+
+# CORS middleware for Capacitor iOS app and web
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "capacitor://localhost",  # iOS Capacitor
+        "http://localhost",       # Android Capacitor
+        "http://localhost:3000",  # Next.js dev
+        "https://localhost",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/healthz")
