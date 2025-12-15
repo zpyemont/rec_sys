@@ -373,6 +373,106 @@ class PostgresClient:
 
         return self.fetch_val_list(sql, params)
 
+    def get_candidates_from_categories_diverse(
+        self,
+        categories: List[str],
+        price_range: Optional[Dict],
+        limit: int,
+        max_per_brand: int = 20
+    ) -> List[str]:
+        """
+        Get products in specific categories with brand diversity.
+        Uses round-robin sampling to limit products per brand.
+
+        Supports both hierarchical (subcategory) and flat (category) matching:
+        - Match subcategory first for precise results
+        - Fall back to category for products without subcategory
+        """
+        if not categories:
+            return []
+
+        stock_filter, stock_params = self._build_stock_filter_clause()
+
+        # Convert categories to lowercase for fallback matching
+        categories_lower = [cat.lower() for cat in categories]
+
+        if price_range and price_range.get('min') and price_range.get('max'):
+            if stock_filter:
+                sql = f"""
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
+                        FROM products
+                        WHERE (
+                            subcategory = ANY(%s)
+                            OR LOWER(category) = ANY(%s)
+                        )
+                          AND price BETWEEN %s AND %s
+                          AND {stock_filter}
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [categories, categories_lower, price_range['min'], price_range['max']] + stock_params + [max_per_brand, limit]
+            else:
+                sql = """
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
+                        FROM products
+                        WHERE (
+                            subcategory = ANY(%s)
+                            OR LOWER(category) = ANY(%s)
+                        )
+                          AND price BETWEEN %s AND %s
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [categories, categories_lower, price_range['min'], price_range['max'], max_per_brand, limit]
+        else:
+            if stock_filter:
+                sql = f"""
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
+                        FROM products
+                        WHERE (
+                            subcategory = ANY(%s)
+                            OR LOWER(category) = ANY(%s)
+                        )
+                          AND {stock_filter}
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [categories, categories_lower] + stock_params + [max_per_brand, limit]
+            else:
+                sql = """
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
+                        FROM products
+                        WHERE (
+                            subcategory = ANY(%s)
+                            OR LOWER(category) = ANY(%s)
+                        )
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [categories, categories_lower, max_per_brand, limit]
+
+        return self.fetch_val_list(sql, params)
+
     def get_candidates_from_brands(
         self,
         brands: List[str],
@@ -427,6 +527,87 @@ class PostgresClient:
                     LIMIT %s
                 """
                 params = [brands, limit]
+
+        return self.fetch_val_list(sql, params)
+
+    def get_candidates_from_brands_diverse(
+        self,
+        brands: List[str],
+        price_range: Optional[Dict],
+        limit: int,
+        max_per_brand: int = 20
+    ) -> List[str]:
+        """
+        Get products from specific brands with brand diversity.
+        Ensures even distribution across multiple preferred brands.
+        """
+        if not brands:
+            return []
+
+        stock_filter, stock_params = self._build_stock_filter_clause()
+
+        if price_range and price_range.get('min') and price_range.get('max'):
+            if stock_filter:
+                sql = f"""
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
+                        FROM products
+                        WHERE brand = ANY(%s)
+                          AND price BETWEEN %s AND %s
+                          AND {stock_filter}
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [brands, price_range['min'], price_range['max']] + stock_params + [max_per_brand, limit]
+            else:
+                sql = """
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
+                        FROM products
+                        WHERE brand = ANY(%s)
+                          AND price BETWEEN %s AND %s
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [brands, price_range['min'], price_range['max'], max_per_brand, limit]
+        else:
+            if stock_filter:
+                sql = f"""
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
+                        FROM products
+                        WHERE brand = ANY(%s)
+                          AND {stock_filter}
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [brands] + stock_params + [max_per_brand, limit]
+            else:
+                sql = """
+                    WITH ranked AS (
+                        SELECT product_id, brand,
+                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
+                        FROM products
+                        WHERE brand = ANY(%s)
+                    )
+                    SELECT product_id FROM ranked
+                    WHERE rn <= %s
+                    ORDER BY rn, brand
+                    LIMIT %s
+                """
+                params = [brands, max_per_brand, limit]
 
         return self.fetch_val_list(sql, params)
 

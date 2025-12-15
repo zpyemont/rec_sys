@@ -154,18 +154,12 @@ def get_dynamic_personalized_pool(
     # ═══════════════════════════════════════════════════════════
     fresh_limit = int(pool_size * 0.30)
     try:
-        # Use diverse query for anonymous users to prevent brand domination
-        if is_anonymous:
-            fresh_candidates = pg.get_recent_products_diverse(
-                hours=48,
-                limit=fresh_limit,
-                max_per_brand=10
-            )
-        else:
-            fresh_candidates = pg.get_recent_products(
-                hours=48,
-                limit=fresh_limit
-            )
+        # Use diverse query for all users to prevent brand domination
+        fresh_candidates = pg.get_recent_products_diverse(
+            hours=48,
+            limit=fresh_limit,
+            max_per_brand=15
+        )
         all_candidates.extend([('fresh', pid) for pid in fresh_candidates])
         logger.info(f"✨ Added {len(fresh_candidates)} fresh products (ALL categories)")
     except Exception as e:
@@ -181,21 +175,23 @@ def get_dynamic_personalized_pool(
             behavioral_limit = int(pool_size * 0.40)
             behavioral_candidates = []
 
-            # From preferred categories
+            # From preferred categories (with brand diversity)
             if profile['preferred_categories']:
-                cat_candidates = pg.get_candidates_from_categories(
+                cat_candidates = pg.get_candidates_from_categories_diverse(
                     profile['preferred_categories'],
                     profile['price_range'],
-                    limit=int(behavioral_limit * 0.6)
+                    limit=int(behavioral_limit * 0.6),
+                    max_per_brand=20
                 )
                 behavioral_candidates.extend(cat_candidates)
 
-            # From preferred brands
+            # From preferred brands (with brand diversity to avoid single-brand dominance)
             if profile['preferred_brands']:
-                brand_candidates = pg.get_candidates_from_brands(
+                brand_candidates = pg.get_candidates_from_brands_diverse(
                     profile['preferred_brands'],
                     profile['price_range'],
-                    limit=int(behavioral_limit * 0.4)
+                    limit=int(behavioral_limit * 0.4),
+                    max_per_brand=20
                 )
                 behavioral_candidates.extend(brand_candidates)
 
@@ -263,14 +259,11 @@ def get_dynamic_personalized_pool(
     # If pool is too small, fill with popular
     if len(final) < 1000:
         try:
-            # Use diverse query for anonymous users to prevent brand domination
-            if is_anonymous:
-                popular_candidates = pg.get_popular_products_diverse(
-                    limit=pool_size,
-                    max_per_brand=10
-                )
-            else:
-                popular_candidates = pg.get_popular_products(limit=pool_size)
+            # Use diverse query for all users to prevent brand domination
+            popular_candidates = pg.get_popular_products_diverse(
+                limit=pool_size,
+                max_per_brand=15
+            )
             for pid in popular_candidates:
                 if pid not in seen and pid not in shown_set:
                     seen.add(pid)
