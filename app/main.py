@@ -618,7 +618,7 @@ async def _get_diverse_feed_embedding(
         brand_map = {pid: meta.get("brand") for pid, meta in product_metadata.items()}
 
         # Apply brand diversity (max 2-3 items per brand in final feed)
-        final_ids = enforce_brand_diversity(candidates_for_diversity, brand_map, max_per_brand=3)
+        final_ids = enforce_brand_diversity(candidates_for_diversity, brand_map, max_per_window=3)
         final_ids = final_ids[:final_feed_size]
 
         # Record shown (skip for anonymous users)
