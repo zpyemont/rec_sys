@@ -32,6 +32,11 @@ class FeedResponse(BaseModel):
     total_count: Optional[int] = None  # Total products in catalog
     tier: Optional[int] = None         # Which tier user is in (1-4)
 
+    # Session metadata (for debugging and analytics)
+    session_id: Optional[str] = None           # Echo back session ID
+    cold_start_stage: Optional[str] = None     # User's personalization stage
+    session_positive_count: Optional[int] = None  # Products with positive engagement in session
+
 
 # New schemas for like/unlike endpoints
 class LikeRequest(BaseModel):
@@ -63,8 +68,9 @@ class CollectionsResponse(BaseModel):
 class TrackRequest(BaseModel):
     request_id: int
     user_id: str
+    session_id: Optional[str] = None  # Client-generated session ID for session-aware recommendations
     product_id: str
-    action: str  # "swipe_up", "swipe_down", "like", "collection_add", "shop_now"
+    action: str  # "swipe_up", "swipe_down", "like", "unlike", "collection_add", "shop_now"
     dwell_time: float
     images_viewed: int
     position: int

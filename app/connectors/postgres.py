@@ -1,12 +1,190 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 import contextlib
 
 import psycopg2  # type: ignore
 import psycopg2.extras  # type: ignore
 
+try:
+    import asyncpg  # type: ignore
+except ImportError:
+    asyncpg = None
+
 from ..settings import Settings
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================
+# Async PostgreSQL Client (for new retrieval)
+# ============================================
+
+
+class AsyncPostgresClient:
+    """
+    Async PostgreSQL client using asyncpg for the new retrieval pipeline.
+
+    This client is used by the retrieval module for embedding-based
+    candidate generation with pgvector.
+    """
+
+    def __init__(self, dsn: str):
+        if asyncpg is None:
+            raise RuntimeError("asyncpg not available. Install with: pip install asyncpg")
+        self._dsn = dsn
+        self._pool = None
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "AsyncPostgresClient":
+        """Create client from settings."""
+        if settings.postgres_dsn:
+            # Convert psycopg2-style DSN to asyncpg-style URL
+            dsn = cls._convert_dsn_to_url(settings.postgres_dsn)
+        else:
+            host = settings.pg_host or "localhost"
+            port = settings.pg_port or 5432
+            user = settings.pg_user or "postgres"
+            password = settings.pg_password or ""
+            database = settings.pg_database or "product"
+            dsn = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        return cls(dsn)
+
+    @staticmethod
+    def _convert_dsn_to_url(dsn: str) -> str:
+        """Convert psycopg2-style DSN to asyncpg-style URL."""
+        # If already a URL, return as-is
+        if dsn.startswith("postgresql://") or dsn.startswith("postgres://"):
+            return dsn
+
+        # Parse key=value format
+        parts = {}
+        for item in dsn.split():
+            if "=" in item:
+                key, value = item.split("=", 1)
+                parts[key] = value
+
+        host = parts.get("host", "localhost")
+        port = parts.get("port", "5432")
+        user = parts.get("user", "postgres")
+        password = parts.get("password", "")
+        dbname = parts.get("dbname", "product")
+
+        return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+
+    async def get_pool(self):
+        """Lazy-initialize the connection pool."""
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(
+                self._dsn,
+                min_size=2,
+                max_size=10,
+            )
+            logger.info("AsyncPostgresClient pool created")
+        return self._pool
+
+    async def fetch_all(self, sql: str, params: Optional[List] = None) -> List[Dict[str, Any]]:
+        """
+        Execute query and return all rows as list of dicts.
+
+        Args:
+            sql: SQL query with $1, $2, etc. placeholders
+            params: List of parameter values
+
+        Returns:
+            List of rows as dictionaries
+        """
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, *(params or []))
+            return [dict(row) for row in rows]
+
+    async def fetch_val_list(
+        self,
+        sql: str,
+        params: Optional[List] = None,
+        col: str = "product_id"
+    ) -> List[str]:
+        """
+        Execute query and return single column as list of strings.
+
+        Args:
+            sql: SQL query with $1, $2, etc. placeholders
+            params: List of parameter values
+            col: Column name to extract
+
+        Returns:
+            List of values from the specified column
+        """
+        rows = await self.fetch_all(sql, params)
+        return [str(row[col]) for row in rows if row.get(col) is not None]
+
+    async def fetch_one(self, sql: str, params: Optional[List] = None) -> Optional[Dict[str, Any]]:
+        """
+        Execute query and return first row.
+
+        Args:
+            sql: SQL query with $1, $2, etc. placeholders
+            params: List of parameter values
+
+        Returns:
+            First row as dictionary, or None if no rows
+        """
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(sql, *(params or []))
+            return dict(row) if row else None
+
+    async def execute(self, sql: str, params: Optional[List] = None) -> str:
+        """
+        Execute a query without returning results (INSERT, UPDATE, DELETE).
+
+        Args:
+            sql: SQL query with $1, $2, etc. placeholders
+            params: List of parameter values
+
+        Returns:
+            Status string from the command
+        """
+        pool = await self.get_pool()
+        async with pool.acquire() as conn:
+            return await conn.execute(sql, *(params or []))
+
+    async def close(self):
+        """Close the connection pool."""
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
+            logger.info("AsyncPostgresClient pool closed")
+
+    async def get_product_metadata_for_ids(self, prod_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch full product metadata for given product IDs.
+
+        Args:
+            prod_ids: List of product IDs to fetch
+
+        Returns:
+            Dict mapping product_id -> metadata dict
+        """
+        if not prod_ids:
+            return {}
+
+        rows = await self.fetch_all("""
+            SELECT product_id, title, price, compare_at_price, images, category,
+                   subcategory, like_count, description, url, brand, created_at,
+                   currency, availability, image_has_text
+            FROM products
+            WHERE product_id = ANY($1) AND is_active = true
+        """, [prod_ids])
+
+        return {row['product_id']: row for row in rows}
+
+
+# ============================================
+# Synchronous PostgreSQL Client (existing)
+# ============================================
 
 
 class PostgresClient:

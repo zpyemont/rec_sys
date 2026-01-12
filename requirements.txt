@@ -4,11 +4,13 @@ pydantic==2.8.2
 pydantic-settings==2.4.0
 redis==5.0.7
 psycopg2-binary==2.9.9
+asyncpg==0.29.0
 google-cloud-bigquery==3.11.4
 google-cloud-storage==2.10.0
 google-cloud-firestore==2.11.1
 python-dotenv==1.0.1
 numpy==1.24.3
+cachetools==5.3.2
 confluent-kafka==2.3.0
 tensorflow-serving-api==2.11.1
 grpcio==1.59.0

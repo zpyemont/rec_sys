@@ -204,6 +204,9 @@ class Settings(BaseSettings):
     monolith_timeout: float = 5.0
     monolith_enabled: bool = False  # Feature flag to enable Monolith integration
 
+    # Embedding-based retrieval (pgvector)
+    embedding_retrieval_enabled: bool = True  # Use embedding retrieval instead of heuristic buckets
+
     # Worker ID for request ID generation (for distributed deployments)
     worker_id: int = 1
 

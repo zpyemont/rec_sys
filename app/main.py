@@ -22,9 +22,12 @@ from .connectors.firestore import (
     add_shown_items_fs,
     get_shown_set_fs,
 )
-from .connectors.postgres import PostgresClient
+from .connectors.postgres import PostgresClient, AsyncPostgresClient
+from .connectors.redis_client import get_async_redis_client
 from .connectors.kafka import get_kafka_producer
 from .connectors.tfs_client import get_monolith_client
+
+# Old heuristic candidate sources (legacy)
 from .ranker.candidate_sources import (
     query_popular_ids,
     query_recent_ids,
@@ -33,13 +36,35 @@ from .ranker.candidate_sources import (
     fetch_features_for_ids,
     join_product_metadata,
     get_dynamic_personalized_pool,
+    get_user_liked_product_ids,
 )
 from .ranker.diversifier import (
     slice_buckets_by_ratio,
     interleave_buckets,
     filter_seen_pairs,
+    enforce_brand_diversity,
 )
 from .ranker.model import score_with_model_or_fallback
+
+# New embedding-based retrieval
+from .ranker.retrieval import get_candidates_parallel, get_candidates_for_anonymous
+from .ranker.user_embedding import get_user_embedding
+
+# Session-aware features
+from .connectors.session_store import (
+    record_view as session_record_view,
+    get_session_positive_products,
+    get_session_engagement_map,
+    get_session_stats,
+)
+from .ranker.session_embedding import (
+    get_blended_user_embedding,
+    get_session_embedding,
+    determine_cold_start_stage,
+    STAGE_BRAND_NEW,
+    STAGE_BROWSING,
+)
+
 from .utils import generate_request_id
 
 logger = logging.getLogger(__name__)
@@ -339,12 +364,24 @@ def get_collections(user_id: str = Query(...)) -> CollectionsResponse:
 
 
 @app.get("/get_diverse_feed", response_model=FeedResponse)
-def get_diverse_feed(
+async def get_diverse_feed(
     user_id: str = Query(...),
     device: str | None = Query(None),
     n: int | None = Query(None),
-    exclude_ids: str | None = Query(None)
+    exclude_ids: str | None = Query(None),
+    session_id: str | None = Query(None),  # Client-generated session ID
 ) -> FeedResponse:
+    """
+    Get diverse feed of product recommendations.
+
+    Uses embedding-based retrieval (pgvector) when enabled, otherwise
+    falls back to heuristic candidate generation.
+
+    Session-aware features (when session_id provided):
+    - Blends long-term preferences (likes) with session signals
+    - Adapts recommendations based on in-session engagement
+    - Cold-start strategy based on available signals
+    """
     final_feed_size = n or settings.feed_default_size
 
     # Generate unique request ID for this recommendation request
@@ -352,9 +389,6 @@ def get_diverse_feed(
     event_time = int(time.time() * 1000)
 
     fs_client = get_firestore_client_safe(settings)
-    pg_client = PostgresClient.from_settings(settings)
-
-    # Skip Firestore tracking for anonymous users
     is_anonymous = user_id == "anonymous"
 
     # Parse client-side exclude_ids (for anonymous users or supplemental filtering)
@@ -371,6 +405,285 @@ def get_diverse_feed(
     # Merge client and server shown sets
     shown_set = client_shown_set | server_shown_set
     shown_count = len(shown_set)
+
+    # Use embedding-based retrieval if enabled
+    if settings.embedding_retrieval_enabled:
+        return await _get_diverse_feed_embedding(
+            user_id=user_id,
+            device=device,
+            final_feed_size=final_feed_size,
+            request_id=request_id,
+            event_time=event_time,
+            fs_client=fs_client,
+            is_anonymous=is_anonymous,
+            shown_set=shown_set,
+            shown_count=shown_count,
+            session_id=session_id,
+        )
+    else:
+        return _get_diverse_feed_legacy(
+            user_id=user_id,
+            device=device,
+            final_feed_size=final_feed_size,
+            request_id=request_id,
+            event_time=event_time,
+            fs_client=fs_client,
+            is_anonymous=is_anonymous,
+            shown_set=shown_set,
+            shown_count=shown_count,
+        )
+
+
+async def _get_diverse_feed_embedding(
+    user_id: str,
+    device: str | None,
+    final_feed_size: int,
+    request_id: str,
+    event_time: int,
+    fs_client,
+    is_anonymous: bool,
+    shown_set: set,
+    shown_count: int,
+    session_id: str | None = None,
+) -> FeedResponse:
+    """
+    Embedding-based retrieval using pgvector with session-aware personalization.
+
+    Pipeline:
+    1. Get session engagement data (if session_id provided)
+    2. Determine cold-start stage
+    3. Compute blended user embedding (long-term + session)
+    4. Run parallel retrievers (embedding, fresh, trending, random)
+    5. Score with Monolith (if enabled)
+    6. Apply brand diversity
+    7. Return feed with session metadata
+    """
+    # Initialize async clients
+    async_pg = AsyncPostgresClient.from_settings(settings)
+    async_redis = get_async_redis_client(settings)
+
+    try:
+        # Get total catalog size (sync call is fine here)
+        pg_client = PostgresClient.from_settings(settings)
+        total_products = pg_client.get_total_product_count()
+
+        # Get liked product IDs for user embedding (empty for anonymous)
+        liked_product_ids = []
+        if not is_anonymous:
+            liked_product_ids = get_user_liked_product_ids(fs_client, user_id)
+
+        # Get session engagement data (if session_id provided)
+        session_product_ids = []
+        engagement_scores = {}
+        if session_id and not is_anonymous:
+            session_product_ids = get_session_positive_products(
+                user_id, session_id, min_score=0.3, limit=30
+            )
+            engagement_scores = get_session_engagement_map(user_id, session_id)
+
+        # Determine cold-start stage
+        cold_start_stage = determine_cold_start_stage(
+            len(liked_product_ids),
+            len(session_product_ids)
+        )
+
+        logger.info(
+            f"User {user_id}: stage={cold_start_stage}, "
+            f"likes={len(liked_product_ids)}, session_positive={len(session_product_ids)}"
+        )
+
+        # STEP 1: Compute user embedding based on cold-start stage
+        if is_anonymous:
+            # Anonymous user - non-personalized
+            logger.info(f"Using anonymous retrieval for user={user_id}")
+            candidates = await get_candidates_for_anonymous(
+                async_pg, async_redis, total_limit=500
+            )
+        elif cold_start_stage == STAGE_BRAND_NEW:
+            # Brand new user - exploration mode
+            logger.info(f"Cold-start BRAND_NEW: exploration mode")
+            candidates = await get_candidates_for_anonymous(
+                async_pg, async_redis, total_limit=500
+            )
+        elif cold_start_stage == STAGE_BROWSING:
+            # Has session signals but no likes - use session embedding
+            logger.info(f"Cold-start BROWSING: using session signals only")
+            session_emb = await get_session_embedding(
+                async_pg, session_product_ids, engagement_scores
+            )
+            if session_emb is not None:
+                candidates = await get_candidates_parallel(
+                    async_pg, async_redis, session_emb, shown_set, total_limit=500
+                )
+            else:
+                candidates = await get_candidates_for_anonymous(
+                    async_pg, async_redis, total_limit=500
+                )
+        else:
+            # Has likes - use blended embedding
+            logger.info(
+                f"Using blended embedding: {len(liked_product_ids)} likes + "
+                f"{len(session_product_ids)} session products"
+            )
+            user_embedding = await get_blended_user_embedding(
+                async_pg,
+                liked_product_ids,
+                session_product_ids,
+                engagement_scores,
+            )
+
+            # STEP 2: Parallel retrieval (~10ms)
+            candidates = await get_candidates_parallel(
+                async_pg, async_redis, user_embedding, shown_set, total_limit=500
+            )
+
+        logger.info(f"Retrieved {len(candidates)} candidates via embedding retrieval")
+
+        # Filter to unseen candidates
+        candidates_unseen = [pid for pid in candidates if pid not in shown_set]
+
+        # Calculate pagination metadata
+        has_more = len(candidates_unseen) > final_feed_size
+        unseen_count = len(candidates_unseen)
+
+        # Determine tier
+        if shown_count < 100:
+            tier = 1
+        elif shown_count < 500:
+            tier = 2
+        elif shown_count < 2000:
+            tier = 3
+        else:
+            tier = 4
+
+        # STEP 3: Score with Monolith (if enabled) (~50ms)
+        if settings.monolith_enabled and not is_anonymous and candidates_unseen:
+            try:
+                candidates_to_score = candidates_unseen[:500]
+                monolith_client = get_monolith_client(settings)
+                user_emb, product_embs, scores = monolith_client.predict(
+                    user_id=user_id,
+                    product_ids=candidates_to_score
+                )
+
+                # Publish FeatureEvent to Kafka (if enabled)
+                if settings.kafka_enabled:
+                    try:
+                        kafka_producer = get_kafka_producer(settings)
+                        feature_data = {
+                            "user_id": user_id,
+                            "session_id": session_id,
+                            "user_embedding": user_emb.tolist(),
+                            "context": {
+                                "session_position": len(session_product_ids),
+                                "hour_of_day": time.localtime().tm_hour,
+                                "day_of_week": time.localtime().tm_wday,
+                                "device": device or "unknown",
+                                "cold_start_stage": cold_start_stage,
+                            },
+                            "candidates": [
+                                {
+                                    "product_id": pid,
+                                    "product_embedding": product_embs[pid].tolist(),
+                                    "monolith_score": scores[pid],
+                                    "position": i
+                                }
+                                for i, pid in enumerate(list(scores.keys())[:20])
+                            ]
+                        }
+                        kafka_producer.publish_feature_event(request_id, event_time, feature_data)
+                        logger.info(f"Published FeatureEvent for request_id={request_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to publish FeatureEvent: {e}")
+
+                # Sort by Monolith scores
+                ranked_candidates = sorted(
+                    [(pid, scores.get(pid, 0)) for pid in candidates_to_score],
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                candidates_unseen = [pid for pid, _ in ranked_candidates]
+                logger.info(f"Monolith ranked {len(candidates_unseen)} candidates")
+
+            except Exception as e:
+                logger.error(f"Monolith prediction failed: {e}")
+                # Fall through with embedding-ordered candidates
+
+        # STEP 4: Fetch metadata and apply brand diversity (~5ms)
+        # Take extra candidates for diversity filtering
+        candidates_for_diversity = candidates_unseen[:final_feed_size * 3]
+        product_metadata = await async_pg.get_product_metadata_for_ids(candidates_for_diversity)
+
+        # Build brand map for diversity enforcement
+        brand_map = {pid: meta.get("brand") for pid, meta in product_metadata.items()}
+
+        # Apply brand diversity (max 2-3 items per brand in final feed)
+        final_ids = enforce_brand_diversity(candidates_for_diversity, brand_map, max_per_brand=3)
+        final_ids = final_ids[:final_feed_size]
+
+        # Record shown (skip for anonymous users)
+        if not is_anonymous:
+            add_shown_items_fs(fs_client, user_id, final_ids)
+
+        # Build feed response
+        items = [
+            ProductItem(
+                id=pid,
+                title=meta.get("title"),
+                price=meta.get("price"),
+                compare_at_price=meta.get("compare_at_price"),
+                images=meta.get("images", []),
+                image_has_text=meta.get("image_has_text"),
+                category=meta.get("category"),
+                subcategory=meta.get("subcategory"),
+                like_count=meta.get("like_count", 0),
+                description=meta.get("description"),
+                url=meta.get("url"),
+                brand=meta.get("brand"),
+                created_at=meta.get("created_at"),
+                currency=meta.get("currency"),
+                availability=meta.get("availability")
+            )
+            for pid in final_ids
+            if (meta := product_metadata.get(pid))
+        ]
+
+        return FeedResponse(
+            feed=items,
+            request_id=request_id,
+            has_more=has_more,
+            unseen_count=unseen_count,
+            shown_count=shown_count,
+            total_count=total_products,
+            tier=tier,
+            # Session metadata
+            session_id=session_id,
+            cold_start_stage=cold_start_stage,
+            session_positive_count=len(session_product_ids),
+        )
+
+    finally:
+        # Clean up async clients
+        await async_redis.close()
+
+
+def _get_diverse_feed_legacy(
+    user_id: str,
+    device: str | None,
+    final_feed_size: int,
+    request_id: str,
+    event_time: int,
+    fs_client,
+    is_anonymous: bool,
+    shown_set: set,
+    shown_count: int,
+) -> FeedResponse:
+    """
+    Legacy heuristic-based candidate generation.
+
+    This is the original implementation kept for fallback.
+    """
+    pg_client = PostgresClient.from_settings(settings)
 
     # Get total catalog size
     total_products = pg_client.get_total_product_count()
@@ -406,27 +719,21 @@ def get_diverse_feed(
     # Step 3: Score candidates with Monolith (if enabled)
     if settings.monolith_enabled and not is_anonymous and candidates_unseen:
         try:
-            # Limit candidates to top 500 for efficiency
             candidates_to_score = candidates_unseen[:500]
-
-            # Call Monolith for predictions
             monolith_client = get_monolith_client(settings)
             user_emb, product_embs, scores = monolith_client.predict(
                 user_id=user_id,
                 product_ids=candidates_to_score
             )
 
-            # Publish FeatureEvent to Kafka (if enabled)
             if settings.kafka_enabled:
                 try:
                     kafka_producer = get_kafka_producer(settings)
-
-                    # Build feature data
                     feature_data = {
                         "user_id": user_id,
                         "user_embedding": user_emb.tolist(),
                         "context": {
-                            "session_position": 1,  # TODO: Track from session
+                            "session_position": 1,
                             "hour_of_day": time.localtime().tm_hour,
                             "day_of_week": time.localtime().tm_wday,
                             "device": device or "unknown"
@@ -438,26 +745,22 @@ def get_diverse_feed(
                                 "monolith_score": scores[pid],
                                 "position": i
                             }
-                            for i, pid in enumerate(list(scores.keys())[:20])  # Top 20
+                            for i, pid in enumerate(list(scores.keys())[:20])
                         ]
                     }
-
                     kafka_producer.publish_feature_event(request_id, event_time, feature_data)
                     logger.info(f"Published FeatureEvent for request_id={request_id}")
                 except Exception as e:
                     logger.error(f"Failed to publish FeatureEvent: {e}")
 
-            # Use Monolith scores
             personal_scores = scores
             logger.info(f"Monolith predictions successful: {len(personal_scores)} products scored")
 
         except Exception as e:
             logger.error(f"Monolith prediction failed: {e}, falling back to stub scoring")
-            # Fallback to existing logic
             features = fetch_features_for_ids(candidates_unseen)
             personal_scores = score_with_model_or_fallback(features, fallback_scores=None)
     else:
-        # Use existing fallback scoring (Monolith disabled or anonymous user)
         features = fetch_features_for_ids(candidates_unseen)
         personal_scores = score_with_model_or_fallback(features, fallback_scores=None)
 
@@ -552,10 +855,15 @@ def get_diverse_feed(
 @app.post("/track", response_model=TrackResponse)
 def track_interaction(request: TrackRequest) -> TrackResponse:
     """
-    Track user interaction and publish ActionEvent to Kafka
+    Track user interaction with session-aware engagement scoring.
 
-    This endpoint receives user interaction events (swipes, likes, etc.)
-    and publishes them to Kafka for joining with FeatureEvents
+    Records interaction in in-memory session store for real-time
+    recommendation adaptation, and publishes to Kafka for offline training.
+
+    Session features:
+    - Revisit detection (scrolling back to a product)
+    - Engagement score computation with correct signal weights
+    - Position history tracking
     """
     # Ignore anonymous users
     if request.user_id == "anonymous":
@@ -565,47 +873,73 @@ def track_interaction(request: TrackRequest) -> TrackResponse:
             message="Anonymous users not tracked"
         )
 
-    # Only publish if Kafka is enabled
-    if not settings.kafka_enabled:
-        return TrackResponse(
-            status="skipped",
-            request_id=request.request_id,
-            message="Kafka publishing disabled"
-        )
-
     event_time = int(time.time() * 1000)
+    engagement = None
+    is_revisit = False
 
-    # Determine label (1.0 for positive actions, 0.0 for negative)
-    positive_actions = {"swipe_up", "like", "collection_add", "shop_now"}
-    label = 1.0 if request.action in positive_actions else 0.0
+    # Record in session store (if session_id provided)
+    if request.session_id:
+        try:
+            engagement = session_record_view(
+                user_id=request.user_id,
+                session_id=request.session_id,
+                product_id=request.product_id,
+                position=request.position,
+                dwell_time=request.dwell_time,
+                images_viewed=request.images_viewed,
+                action=request.action,
+            )
+            is_revisit = engagement.is_revisit
 
-    action_data = {
-        "user_id": request.user_id,
-        "product_id": request.product_id,
-        "action": request.action,
-        "dwell_time": request.dwell_time,
-        "images_viewed": request.images_viewed,
-        "position": request.position,
-        "label": label
-    }
+            logger.debug(
+                f"Session recorded: user={request.user_id}, session={request.session_id}, "
+                f"product={request.product_id}, score={engagement.engagement_score:.2f}, "
+                f"is_revisit={is_revisit}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record session: {e}")
 
-    try:
-        kafka_producer = get_kafka_producer(settings)
-        kafka_producer.publish_action_event(request.request_id, event_time, action_data)
+    # Compute label based on CORRECTED signal interpretation
+    # NOTE: swipe_up is NOT positive - it's just moving on
+    # Positive signals: like, collection_add, shop_now, revisit with engagement
+    if engagement:
+        # Use engagement score from session store
+        label = max(0.0, engagement.engagement_score)
+    else:
+        # Fallback if no session: only explicit positive actions
+        explicit_positive = {"like", "collection_add", "shop_now"}
+        label = 1.0 if request.action in explicit_positive else 0.0
 
-        logger.info(
-            f"Published ActionEvent: request_id={request.request_id}, "
-            f"user={request.user_id}, product={request.product_id}, action={request.action}"
-        )
+    # Publish to Kafka (if enabled)
+    if settings.kafka_enabled:
+        action_data = {
+            "user_id": request.user_id,
+            "session_id": request.session_id,
+            "product_id": request.product_id,
+            "action": request.action,
+            "dwell_time": request.dwell_time,
+            "images_viewed": request.images_viewed,
+            "position": request.position,
+            "is_revisit": is_revisit,
+            "engagement_score": engagement.engagement_score if engagement else 0.0,
+            "label": label,
+        }
 
-        return TrackResponse(
-            status="tracked",
-            request_id=request.request_id,
-            message="Interaction tracked successfully"
-        )
-    except Exception as e:
-        logger.error(f"Failed to publish ActionEvent: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to track interaction: {str(e)}"
-        )
+        try:
+            kafka_producer = get_kafka_producer(settings)
+            kafka_producer.publish_action_event(request.request_id, event_time, action_data)
+
+            logger.info(
+                f"Published ActionEvent: request_id={request.request_id}, "
+                f"user={request.user_id}, product={request.product_id}, "
+                f"action={request.action}, score={action_data['engagement_score']:.2f}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to publish ActionEvent: {e}")
+            # Don't fail the request if Kafka publish fails
+
+    return TrackResponse(
+        status="tracked",
+        request_id=request.request_id,
+        message=f"Engagement score: {engagement.engagement_score:.2f}" if engagement else "Tracked"
+    )
