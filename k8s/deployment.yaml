@@ -71,7 +71,7 @@ spec:
         - --structured-logs
         - --address=127.0.0.1
         - --port=5432
-        - looksyuk:europe-west1:products
+        - looksyuk:europe-west1:looksy-catalog-prod
         resources:
           requests:
             cpu: 100m

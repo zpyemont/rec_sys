@@ -6,27 +6,21 @@ substitutions:
   _AR_REPO: containers
   _GKE_CLUSTER: rec-sys-cluster
   _GKE_LOCATION: europe-west1
-  _CLOUD_SQL_INSTANCE: "looksyuk:europe-west1:products"
+  _CLOUD_SQL_INSTANCE: "looksyuk:europe-west1:looksy-catalog-prod"
 
 steps:
+  # Build with SHA tag only (immutable for GKE deployment)
   - name: gcr.io/cloud-builders/docker
     args:
       - build
       - -t
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}
-      - -t
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:latest
       - .
 
   - name: gcr.io/cloud-builders/docker
     args:
       - push
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}
-
-  - name: gcr.io/cloud-builders/docker
-    args:
-      - push
-      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:latest
 
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:latest
     entrypoint: bash
@@ -43,4 +37,3 @@ steps:
 
 images:
 - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:${SHORT_SHA}
-- ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ranker:latest

@@ -1,15 +1,26 @@
+"""
+PostgreSQL client for rec_sys (v2 - normalized schema).
+
+Uses the new schema structure with JOINs across:
+- catalog.products - Core product data
+- catalog.product_pricing - Pricing, availability, like_count
+- catalog.product_images - Product images (aggregated)
+- embeddings.product_vectors - Image embeddings
+- health.product_status - Health/staleness (for is_active)
+"""
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 import contextlib
 
-import psycopg2  # type: ignore
-import psycopg2.extras  # type: ignore
-import psycopg2.pool  # type: ignore
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
 
 try:
-    import asyncpg  # type: ignore
+    import asyncpg
 except ImportError:
     asyncpg = None
 
@@ -18,53 +29,39 @@ from ..settings import Settings
 logger = logging.getLogger(__name__)
 
 
-# ============================================
-# Async PostgreSQL Client (for new retrieval)
-# ============================================
-
-
 class AsyncPostgresClient:
-    """
-    Async PostgreSQL client using asyncpg for the new retrieval pipeline.
+    """Async PostgreSQL client for the new normalized schema."""
 
-    This client is used by the retrieval module for embedding-based
-    candidate generation with pgvector.
-    """
-    _pool = None  # Class-level pool (singleton)
+    _pool = None
     _pool_dsn = None
 
     def __init__(self, dsn: str):
         if asyncpg is None:
-            raise RuntimeError("asyncpg not available. Install with: pip install asyncpg")
+            raise RuntimeError("asyncpg not available")
         self._dsn = dsn
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "AsyncPostgresClient":
-        """Create client from settings."""
         from urllib.parse import quote
 
         if settings.postgres_dsn:
-            # Convert psycopg2-style DSN to asyncpg-style URL
             dsn = cls._convert_dsn_to_url(settings.postgres_dsn)
         else:
             host = settings.pg_host or "localhost"
             port = settings.pg_port or 5432
             user = settings.pg_user or "postgres"
             password = quote(settings.pg_password or "", safe="")
-            database = settings.pg_database or "product"
+            database = settings.pg_database or "looksy"
             dsn = f"postgresql://{user}:{password}@{host}:{port}/{database}"
         return cls(dsn)
 
     @staticmethod
     def _convert_dsn_to_url(dsn: str) -> str:
-        """Convert psycopg2-style DSN to asyncpg-style URL."""
         from urllib.parse import quote
 
-        # If already a URL, return as-is
         if dsn.startswith("postgresql://") or dsn.startswith("postgres://"):
             return dsn
 
-        # Parse key=value format
         parts = {}
         for item in dsn.split():
             if "=" in item:
@@ -75,12 +72,11 @@ class AsyncPostgresClient:
         port = parts.get("port", "5432")
         user = parts.get("user", "postgres")
         password = quote(parts.get("password", ""), safe="")
-        dbname = parts.get("dbname", "product")
+        dbname = parts.get("dbname", "looksy")
 
         return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
     async def get_pool(self):
-        """Lazy-initialize the connection pool (singleton)."""
         if AsyncPostgresClient._pool is None or AsyncPostgresClient._pool_dsn != self._dsn:
             if AsyncPostgresClient._pool is not None:
                 await AsyncPostgresClient._pool.close()
@@ -90,20 +86,10 @@ class AsyncPostgresClient:
                 max_size=5,
             )
             AsyncPostgresClient._pool_dsn = self._dsn
-            logger.info("AsyncPostgresClient pool created (max=5)")
+            logger.info("AsyncPostgresClient pool created")
         return AsyncPostgresClient._pool
 
     async def fetch_all(self, sql: str, params: Optional[List] = None) -> List[Dict[str, Any]]:
-        """
-        Execute query and return all rows as list of dicts.
-
-        Args:
-            sql: SQL query with $1, $2, etc. placeholders
-            params: List of parameter values
-
-        Returns:
-            List of rows as dictionaries
-        """
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(sql, *(params or []))
@@ -115,89 +101,58 @@ class AsyncPostgresClient:
         params: Optional[List] = None,
         col: str = "product_id"
     ) -> List[str]:
-        """
-        Execute query and return single column as list of strings.
-
-        Args:
-            sql: SQL query with $1, $2, etc. placeholders
-            params: List of parameter values
-            col: Column name to extract
-
-        Returns:
-            List of values from the specified column
-        """
         rows = await self.fetch_all(sql, params)
         return [str(row[col]) for row in rows if row.get(col) is not None]
 
     async def fetch_one(self, sql: str, params: Optional[List] = None) -> Optional[Dict[str, Any]]:
-        """
-        Execute query and return first row.
-
-        Args:
-            sql: SQL query with $1, $2, etc. placeholders
-            params: List of parameter values
-
-        Returns:
-            First row as dictionary, or None if no rows
-        """
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(sql, *(params or []))
             return dict(row) if row else None
 
     async def execute(self, sql: str, params: Optional[List] = None) -> str:
-        """
-        Execute a query without returning results (INSERT, UPDATE, DELETE).
-
-        Args:
-            sql: SQL query with $1, $2, etc. placeholders
-            params: List of parameter values
-
-        Returns:
-            Status string from the command
-        """
         pool = await self.get_pool()
         async with pool.acquire() as conn:
             return await conn.execute(sql, *(params or []))
 
-    async def close(self):
-        """Close the connection pool."""
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
-            logger.info("AsyncPostgresClient pool closed")
-
     async def get_product_metadata_for_ids(self, prod_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Fetch full product metadata for given product IDs.
-
-        Args:
-            prod_ids: List of product IDs to fetch
-
-        Returns:
-            Dict mapping product_id -> metadata dict
-        """
+        """Fetch full product metadata for given product IDs."""
         if not prod_ids:
             return {}
 
         rows = await self.fetch_all("""
-            SELECT product_id, title, price, compare_at_price, images, category,
-                   subcategory, like_count, description, url, brand, created_at,
-                   currency, availability, image_has_text
-            FROM products
-            WHERE product_id = ANY($1) AND is_active = true
+            SELECT
+                p.product_id,
+                p.title,
+                p.description,
+                p.brand,
+                p.category,
+                p.subcategory,
+                p.url,
+                p.created_at,
+                pr.price,
+                pr.compare_at_price,
+                pr.currency,
+                pr.availability,
+                pr.like_count,
+                ARRAY_AGG(i.image_url ORDER BY i.position) FILTER (WHERE i.image_url IS NOT NULL) as images,
+                ARRAY_AGG(i.has_text_overlay ORDER BY i.position) FILTER (WHERE i.image_url IS NOT NULL) as image_has_text
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            LEFT JOIN catalog.product_images i ON p.product_id = i.product_id
+            WHERE p.product_id = ANY($1) AND pr.is_active = true
+            GROUP BY p.product_id, p.title, p.description, p.brand, p.category,
+                     p.subcategory, p.url, p.created_at, pr.price, pr.compare_at_price,
+                     pr.currency, pr.availability, pr.like_count
         """, [prod_ids])
 
         return {row['product_id']: row for row in rows}
 
 
-# ============================================
-# Synchronous PostgreSQL Client (existing)
-# ============================================
-
-
 class PostgresClient:
-    _pool = None  # Class-level connection pool (singleton)
+    """Synchronous PostgreSQL client for the new normalized schema."""
+
+    _pool = None
     _pool_dsn = None
 
     def __init__(self, dsn: str, settings: Optional[Settings] = None):
@@ -206,7 +161,6 @@ class PostgresClient:
         self._init_pool()
 
     def _init_pool(self):
-        """Initialize the connection pool (singleton)."""
         if PostgresClient._pool is None or PostgresClient._pool_dsn != self._dsn:
             if PostgresClient._pool is not None:
                 PostgresClient._pool.closeall()
@@ -216,7 +170,7 @@ class PostgresClient:
                 dsn=self._dsn
             )
             PostgresClient._pool_dsn = self._dsn
-            logger.info("PostgresClient connection pool created (max=5)")
+            logger.info("PostgresClient connection pool created")
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "PostgresClient":
@@ -227,7 +181,7 @@ class PostgresClient:
             port = settings.pg_port or 5432
             user = settings.pg_user or "postgres"
             password = settings.pg_password or ""
-            database = settings.pg_database or "product"  # Default to 'product' database used by ingestion_pipeline
+            database = settings.pg_database or "looksy"
             dsn = f"host={host} port={port} user={user} password={password} dbname={database}"
         return cls(dsn, settings)
 
@@ -254,249 +208,175 @@ class PostgresClient:
         return [str(r.get(col)) for r in rows if r.get(col) is not None]
 
     def _build_stock_filter_clause(self) -> tuple[str, list[str]]:
-        """
-        Build a SQL WHERE clause to filter out out-of-stock and inactive products.
-        Returns: (where_clause, params) tuple
-        """
-        clauses = []
+        """Build SQL WHERE clause to filter out-of-stock and inactive products."""
+        clauses = ["pr.is_active = true"]
         params = []
 
-        # ALWAYS filter inactive products (staleness tracking)
-        clauses.append("is_active = true")
-
-        # Optionally filter out-of-stock products
         if self._settings and self._settings.filter_out_of_stock:
             excluded_values = self._settings.excluded_availability_values
             if excluded_values:
                 placeholders = ", ".join(["%s"] * len(excluded_values))
-                clauses.append(f"(availability IS NULL OR LOWER(availability) NOT IN ({placeholders}))")
+                clauses.append(f"(pr.availability IS NULL OR LOWER(pr.availability) NOT IN ({placeholders}))")
                 params.extend([v.lower() for v in excluded_values])
 
-        if clauses:
-            where_clause = " AND ".join(clauses)
-            return (where_clause, params)
-        else:
-            return ("", [])
+        return (" AND ".join(clauses), params)
 
-    # Specific helpers against products table
     def get_recent_products(self, hours: int, limit: int) -> List[str]:
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = (
-                "SELECT product_id FROM products "
-                "WHERE parsed_at >= NOW() - INTERVAL '%s hours' "
-                f"AND {stock_filter} "
-                "ORDER BY parsed_at DESC NULLS LAST LIMIT %s"
-            )
-            params = [hours] + stock_params + [limit]
-        else:
-            sql = (
-                "SELECT product_id FROM products "
-                "WHERE parsed_at >= NOW() - INTERVAL '%s hours' "
-                "ORDER BY parsed_at DESC NULLS LAST LIMIT %s"
-            )
-            params = [hours, limit]
-
+        sql = f"""
+            SELECT p.product_id
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE p.parsed_at >= NOW() - INTERVAL '%s hours'
+              AND {stock_filter}
+            ORDER BY p.parsed_at DESC NULLS LAST
+            LIMIT %s
+        """
+        params = [hours] + stock_params + [limit]
         return self.fetch_val_list(sql, params)
 
     def get_recent_products_diverse(self, hours: int, limit: int, max_per_brand: int = 5) -> List[str]:
-        """
-        Get recent products with brand diversity using round-robin sampling.
-        Returns up to max_per_brand products from each brand, interleaved.
-        """
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = f"""
-                WITH ranked AS (
-                    SELECT product_id, brand,
-                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY parsed_at DESC) as rn
-                    FROM products
-                    WHERE parsed_at >= NOW() - INTERVAL '%s hours'
-                      AND {stock_filter}
-                )
-                SELECT product_id FROM ranked
-                WHERE rn <= %s
-                ORDER BY rn, brand
-                LIMIT %s
-            """
-            params = [hours] + stock_params + [max_per_brand, limit]
-        else:
-            sql = """
-                WITH ranked AS (
-                    SELECT product_id, brand,
-                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY parsed_at DESC) as rn
-                    FROM products
-                    WHERE parsed_at >= NOW() - INTERVAL '%s hours'
-                )
-                SELECT product_id FROM ranked
-                WHERE rn <= %s
-                ORDER BY rn, brand
-                LIMIT %s
-            """
-            params = [hours, max_per_brand, limit]
-
+        sql = f"""
+            WITH ranked AS (
+                SELECT p.product_id, p.brand,
+                       ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY p.parsed_at DESC) as rn
+                FROM catalog.products p
+                JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                WHERE p.parsed_at >= NOW() - INTERVAL '%s hours'
+                  AND {stock_filter}
+            )
+            SELECT product_id FROM ranked
+            WHERE rn <= %s
+            ORDER BY rn, brand
+            LIMIT %s
+        """
+        params = [hours] + stock_params + [max_per_brand, limit]
         return self.fetch_val_list(sql, params)
 
     def get_popular_products(self, limit: int) -> List[str]:
-        # Placeholder popularity = latest updated_at
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = (
-                "SELECT product_id FROM products "
-                f"WHERE {stock_filter} "
-                "ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST LIMIT %s"
-            )
-            params = stock_params + [limit]
-        else:
-            sql = (
-                "SELECT product_id FROM products "
-                "ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST LIMIT %s"
-            )
-            params = [limit]
-
+        sql = f"""
+            SELECT p.product_id
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE {stock_filter}
+            ORDER BY pr.like_count DESC, pr.updated_at DESC NULLS LAST
+            LIMIT %s
+        """
+        params = stock_params + [limit]
         return self.fetch_val_list(sql, params)
 
     def get_popular_products_diverse(self, limit: int, max_per_brand: int = 5) -> List[str]:
-        """
-        Get popular products with brand diversity using round-robin sampling.
-        Returns up to max_per_brand products from each brand, interleaved by popularity rank.
-        """
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = f"""
-                WITH ranked AS (
-                    SELECT product_id, brand,
-                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
-                    FROM products
-                    WHERE {stock_filter}
-                )
-                SELECT product_id FROM ranked
-                WHERE rn <= %s
-                ORDER BY rn, brand
-                LIMIT %s
-            """
-            params = stock_params + [max_per_brand, limit]
-        else:
-            sql = """
-                WITH ranked AS (
-                    SELECT product_id, brand,
-                           ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
-                    FROM products
-                )
-                SELECT product_id FROM ranked
-                WHERE rn <= %s
-                ORDER BY rn, brand
-                LIMIT %s
-            """
-            params = [max_per_brand, limit]
-
+        sql = f"""
+            WITH ranked AS (
+                SELECT p.product_id, p.brand,
+                       ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY pr.like_count DESC, pr.updated_at DESC) as rn
+                FROM catalog.products p
+                JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                WHERE {stock_filter}
+            )
+            SELECT product_id FROM ranked
+            WHERE rn <= %s
+            ORDER BY rn, brand
+            LIMIT %s
+        """
+        params = stock_params + [max_per_brand, limit]
         return self.fetch_val_list(sql, params)
 
     def get_by_brand_or_vendor(self, cat: str, limit: int) -> List[str]:
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = (
-                "SELECT product_id FROM products "
-                "WHERE (LOWER(brand) = LOWER(%s) OR LOWER(vendor) = LOWER(%s)) "
-                f"AND {stock_filter} "
-                "ORDER BY updated_at DESC NULLS LAST LIMIT %s"
-            )
-            params = [cat, cat] + stock_params + [limit]
-        else:
-            sql = (
-                "SELECT product_id FROM products "
-                "WHERE LOWER(brand) = LOWER(%s) OR LOWER(vendor) = LOWER(%s) "
-                "ORDER BY updated_at DESC NULLS LAST LIMIT %s"
-            )
-            params = [cat, cat, limit]
-
+        sql = f"""
+            SELECT p.product_id
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE (LOWER(p.brand) = LOWER(%s) OR LOWER(p.vendor) = LOWER(%s))
+              AND {stock_filter}
+            ORDER BY pr.updated_at DESC NULLS LAST
+            LIMIT %s
+        """
+        params = [cat, cat] + stock_params + [limit]
         return self.fetch_val_list(sql, params)
 
     def get_product_metadata_for_ids(self, prod_ids: List[str]) -> List[Dict[str, Any]]:
-        """
-        Fetch full product metadata for given product IDs.
-        Returns: List of dicts with all product fields needed by frontend.
-        """
-        import logging
-        logger = logging.getLogger(__name__)
-
+        """Fetch full product metadata for given product IDs."""
         if not prod_ids:
             return []
-        # Use ANY with array param to avoid SQL injection if list is large
-        # Filter inactive products to prevent showing stale/delisted items
-        sql = (
-            "SELECT product_id, title, price, compare_at_price, images, category, like_count, "
-            "description, url, brand, created_at, currency, availability, image_has_text "
-            "FROM products "
-            "WHERE product_id = ANY(%s) AND is_active = true"
-        )
-        rows = self.fetch_all(sql, (prod_ids,))
 
-        # Log first row to debug
-        if rows:
-            logger.info(f"PostgreSQL returned {len(rows)} rows")
-            logger.info(f"First row keys: {rows[0].keys()}")
-            logger.info(f"First row image_has_text: {rows[0].get('image_has_text')}, type: {type(rows[0].get('image_has_text'))}")
-
-        return rows
+        sql = """
+            SELECT
+                p.product_id,
+                p.title,
+                p.description,
+                p.brand,
+                p.category,
+                p.subcategory,
+                p.url,
+                p.created_at,
+                pr.price,
+                pr.compare_at_price,
+                pr.currency,
+                pr.availability,
+                pr.like_count,
+                ARRAY_AGG(i.image_url ORDER BY i.position) FILTER (WHERE i.image_url IS NOT NULL) as images,
+                ARRAY_AGG(i.has_text_overlay ORDER BY i.position) FILTER (WHERE i.image_url IS NOT NULL) as image_has_text
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            LEFT JOIN catalog.product_images i ON p.product_id = i.product_id
+            WHERE p.product_id = ANY(%s) AND pr.is_active = true
+            GROUP BY p.product_id, p.title, p.description, p.brand, p.category,
+                     p.subcategory, p.url, p.created_at, pr.price, pr.compare_at_price,
+                     pr.currency, pr.availability, pr.like_count
+        """
+        return self.fetch_all(sql, (prod_ids,))
 
     def increment_like_count(self, product_id: str) -> int:
-        """
-        Increment like count for a product and return new count.
-        """
+        """Increment like count for a product."""
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE products
+                cur.execute("""
+                    UPDATE catalog.product_pricing
                     SET like_count = like_count + 1,
                         updated_at = NOW()
                     WHERE product_id = %s
                     RETURNING like_count
-                    """,
-                    (product_id,)
-                )
+                """, (product_id,))
                 result = cur.fetchone()
                 conn.commit()
                 return result[0] if result else 0
 
     def decrement_like_count(self, product_id: str) -> int:
-        """
-        Decrement like count for a product (min 0) and return new count.
-        """
+        """Decrement like count for a product (min 0)."""
         with self._get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE products
+                cur.execute("""
+                    UPDATE catalog.product_pricing
                     SET like_count = GREATEST(like_count - 1, 0),
                         updated_at = NOW()
                     WHERE product_id = %s
                     RETURNING like_count
-                    """,
-                    (product_id,)
-                )
+                """, (product_id,))
                 result = cur.fetchone()
                 conn.commit()
                 return result[0] if result else 0
 
     def get_total_product_count(self) -> int:
-        """Get total count of in-stock products"""
+        """Get total count of active products."""
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = f"SELECT COUNT(*) as count FROM products WHERE {stock_filter}"
-            params = stock_params
-        else:
-            sql = "SELECT COUNT(*) as count FROM products"
-            params = []
-
-        rows = self.fetch_all(sql, params)
+        sql = f"""
+            SELECT COUNT(*) as count
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE {stock_filter}
+        """
+        rows = self.fetch_all(sql, stock_params)
         return rows[0]['count'] if rows else 0
 
     def get_candidates_from_categories(
@@ -505,75 +385,36 @@ class PostgresClient:
         price_range: Optional[Dict],
         limit: int
     ) -> List[str]:
-        """
-        Get products in specific categories, optionally filtered by price.
-
-        Supports both hierarchical (subcategory) and flat (category) matching:
-        - Match subcategory first for precise results
-        - Fall back to category for products without subcategory
-        """
+        """Get products in specific categories."""
         if not categories:
             return []
 
         stock_filter, stock_params = self._build_stock_filter_clause()
-
-        # Convert categories to lowercase for fallback matching
         categories_lower = [cat.lower() for cat in categories]
 
         if price_range and price_range.get('min') and price_range.get('max'):
-            if stock_filter:
-                sql = f"""
-                    SELECT product_id
-                    FROM products
-                    WHERE (
-                        subcategory = ANY(%s)
-                        OR LOWER(category) = ANY(%s)
-                    )
-                      AND price BETWEEN %s AND %s
-                      AND {stock_filter}
-                    ORDER BY like_count DESC, updated_at DESC
-                    LIMIT %s
-                """
-                params = [categories, categories_lower, price_range['min'], price_range['max']] + stock_params + [limit]
-            else:
-                sql = """
-                    SELECT product_id
-                    FROM products
-                    WHERE (
-                        subcategory = ANY(%s)
-                        OR LOWER(category) = ANY(%s)
-                    )
-                      AND price BETWEEN %s AND %s
-                    ORDER BY like_count DESC, updated_at DESC
-                    LIMIT %s
-                """
-                params = [categories, categories_lower, price_range['min'], price_range['max'], limit]
+            sql = f"""
+                SELECT p.product_id
+                FROM catalog.products p
+                JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                WHERE (p.subcategory = ANY(%s) OR LOWER(p.category) = ANY(%s))
+                  AND pr.price BETWEEN %s AND %s
+                  AND {stock_filter}
+                ORDER BY pr.like_count DESC, pr.updated_at DESC
+                LIMIT %s
+            """
+            params = [categories, categories_lower, price_range['min'], price_range['max']] + stock_params + [limit]
         else:
-            if stock_filter:
-                sql = f"""
-                    SELECT product_id
-                    FROM products
-                    WHERE (
-                        subcategory = ANY(%s)
-                        OR LOWER(category) = ANY(%s)
-                    )
-                      AND {stock_filter}
-                    ORDER BY like_count DESC, updated_at DESC
-                    LIMIT %s
-                """
-                params = [categories, categories_lower] + stock_params + [limit]
-            else:
-                sql = """
-                    SELECT product_id
-                    FROM products
-                    WHERE (
-                        subcategory = ANY(%s)
-                        OR LOWER(category) = ANY(%s)
-                    )
-                    ORDER BY like_count DESC, updated_at DESC
-                    LIMIT %s
-                """
-                params = [categories, categories_lower, limit]
+            sql = f"""
+                SELECT p.product_id
+                FROM catalog.products p
+                JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                WHERE (p.subcategory = ANY(%s) OR LOWER(p.category) = ANY(%s))
+                  AND {stock_filter}
+                ORDER BY pr.like_count DESC, pr.updated_at DESC
+                LIMIT %s
+            """
+            params = [categories, categories_lower] + stock_params + [limit]
 
         return self.fetch_val_list(sql, params)
 
@@ -584,96 +425,46 @@ class PostgresClient:
         limit: int,
         max_per_brand: int = 20
     ) -> List[str]:
-        """
-        Get products in specific categories with brand diversity.
-        Uses round-robin sampling to limit products per brand.
-
-        Supports both hierarchical (subcategory) and flat (category) matching:
-        - Match subcategory first for precise results
-        - Fall back to category for products without subcategory
-        """
+        """Get products in specific categories with brand diversity."""
         if not categories:
             return []
 
         stock_filter, stock_params = self._build_stock_filter_clause()
-
-        # Convert categories to lowercase for fallback matching
         categories_lower = [cat.lower() for cat in categories]
 
         if price_range and price_range.get('min') and price_range.get('max'):
-            if stock_filter:
-                sql = f"""
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
-                        FROM products
-                        WHERE (
-                            subcategory = ANY(%s)
-                            OR LOWER(category) = ANY(%s)
-                        )
-                          AND price BETWEEN %s AND %s
-                          AND {stock_filter}
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [categories, categories_lower, price_range['min'], price_range['max']] + stock_params + [max_per_brand, limit]
-            else:
-                sql = """
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
-                        FROM products
-                        WHERE (
-                            subcategory = ANY(%s)
-                            OR LOWER(category) = ANY(%s)
-                        )
-                          AND price BETWEEN %s AND %s
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [categories, categories_lower, price_range['min'], price_range['max'], max_per_brand, limit]
+            sql = f"""
+                WITH ranked AS (
+                    SELECT p.product_id, p.brand,
+                           ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY pr.like_count DESC) as rn
+                    FROM catalog.products p
+                    JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                    WHERE (p.subcategory = ANY(%s) OR LOWER(p.category) = ANY(%s))
+                      AND pr.price BETWEEN %s AND %s
+                      AND {stock_filter}
+                )
+                SELECT product_id FROM ranked
+                WHERE rn <= %s
+                ORDER BY rn, brand
+                LIMIT %s
+            """
+            params = [categories, categories_lower, price_range['min'], price_range['max']] + stock_params + [max_per_brand, limit]
         else:
-            if stock_filter:
-                sql = f"""
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
-                        FROM products
-                        WHERE (
-                            subcategory = ANY(%s)
-                            OR LOWER(category) = ANY(%s)
-                        )
-                          AND {stock_filter}
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [categories, categories_lower] + stock_params + [max_per_brand, limit]
-            else:
-                sql = """
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY like_count DESC, updated_at DESC) as rn
-                        FROM products
-                        WHERE (
-                            subcategory = ANY(%s)
-                            OR LOWER(category) = ANY(%s)
-                        )
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [categories, categories_lower, max_per_brand, limit]
+            sql = f"""
+                WITH ranked AS (
+                    SELECT p.product_id, p.brand,
+                           ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY pr.like_count DESC) as rn
+                    FROM catalog.products p
+                    JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                    WHERE (p.subcategory = ANY(%s) OR LOWER(p.category) = ANY(%s))
+                      AND {stock_filter}
+                )
+                SELECT product_id FROM ranked
+                WHERE rn <= %s
+                ORDER BY rn, brand
+                LIMIT %s
+            """
+            params = [categories, categories_lower] + stock_params + [max_per_brand, limit]
 
         return self.fetch_val_list(sql, params)
 
@@ -683,298 +474,111 @@ class PostgresClient:
         price_range: Optional[Dict],
         limit: int
     ) -> List[str]:
-        """Get products from specific brands, optionally filtered by price"""
+        """Get products from specific brands."""
         if not brands:
             return []
 
         stock_filter, stock_params = self._build_stock_filter_clause()
+        brands_lower = [b.lower() for b in brands]
 
         if price_range and price_range.get('min') and price_range.get('max'):
-            if stock_filter:
-                sql = f"""
-                    SELECT product_id
-                    FROM products
-                    WHERE brand = ANY(%s)
-                      AND price BETWEEN %s AND %s
-                      AND {stock_filter}
-                    ORDER BY updated_at DESC, like_count DESC
-                    LIMIT %s
-                """
-                params = [brands, price_range['min'], price_range['max']] + stock_params + [limit]
-            else:
-                sql = """
-                    SELECT product_id
-                    FROM products
-                    WHERE brand = ANY(%s)
-                      AND price BETWEEN %s AND %s
-                    ORDER BY updated_at DESC, like_count DESC
-                    LIMIT %s
-                """
-                params = [brands, price_range['min'], price_range['max'], limit]
-        else:
-            if stock_filter:
-                sql = f"""
-                    SELECT product_id
-                    FROM products
-                    WHERE brand = ANY(%s)
-                      AND {stock_filter}
-                    ORDER BY updated_at DESC, like_count DESC
-                    LIMIT %s
-                """
-                params = [brands] + stock_params + [limit]
-            else:
-                sql = """
-                    SELECT product_id
-                    FROM products
-                    WHERE brand = ANY(%s)
-                    ORDER BY updated_at DESC, like_count DESC
-                    LIMIT %s
-                """
-                params = [brands, limit]
-
-        return self.fetch_val_list(sql, params)
-
-    def get_candidates_from_brands_diverse(
-        self,
-        brands: List[str],
-        price_range: Optional[Dict],
-        limit: int,
-        max_per_brand: int = 20
-    ) -> List[str]:
-        """
-        Get products from specific brands with brand diversity.
-        Ensures even distribution across multiple preferred brands.
-        """
-        if not brands:
-            return []
-
-        stock_filter, stock_params = self._build_stock_filter_clause()
-
-        if price_range and price_range.get('min') and price_range.get('max'):
-            if stock_filter:
-                sql = f"""
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
-                        FROM products
-                        WHERE brand = ANY(%s)
-                          AND price BETWEEN %s AND %s
-                          AND {stock_filter}
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [brands, price_range['min'], price_range['max']] + stock_params + [max_per_brand, limit]
-            else:
-                sql = """
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
-                        FROM products
-                        WHERE brand = ANY(%s)
-                          AND price BETWEEN %s AND %s
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [brands, price_range['min'], price_range['max'], max_per_brand, limit]
-        else:
-            if stock_filter:
-                sql = f"""
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
-                        FROM products
-                        WHERE brand = ANY(%s)
-                          AND {stock_filter}
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [brands] + stock_params + [max_per_brand, limit]
-            else:
-                sql = """
-                    WITH ranked AS (
-                        SELECT product_id, brand,
-                               ROW_NUMBER() OVER (PARTITION BY brand ORDER BY updated_at DESC, like_count DESC) as rn
-                        FROM products
-                        WHERE brand = ANY(%s)
-                    )
-                    SELECT product_id FROM ranked
-                    WHERE rn <= %s
-                    ORDER BY rn, brand
-                    LIMIT %s
-                """
-                params = [brands, max_per_brand, limit]
-
-        return self.fetch_val_list(sql, params)
-
-    def get_adjacent_categories(
-        self,
-        user_categories: List[str],
-        category_adjacency: Dict[str, List[str]],
-        limit: int
-    ) -> List[str]:
-        """
-        Get products in categories RELATED to user's preferences.
-        Uses category_adjacency map to find related categories.
-
-        Supports both hierarchical (subcategory) and flat (category) matching:
-        - Prefer subcategory for precise matching
-        - Fall back to category for products without subcategory
-        """
-        if not user_categories:
-            return []
-
-        # Find adjacent categories from the adjacency map
-        adjacent = []
-        for cat in user_categories:
-            # Try exact match first (case-sensitive for new subcategories)
-            if cat in category_adjacency:
-                adjacent.extend(category_adjacency[cat])
-            # Fall back to lowercase for backward compatibility
-            elif cat.lower() in category_adjacency:
-                adjacent.extend(category_adjacency[cat.lower()])
-
-        if not adjacent:
-            return []
-
-        stock_filter, stock_params = self._build_stock_filter_clause()
-
-        # Query both subcategory and category fields for best coverage
-        if stock_filter:
             sql = f"""
-                SELECT product_id
-                FROM products
-                WHERE (
-                    subcategory = ANY(%s)
-                    OR LOWER(category) = ANY(%s)
-                )
+                SELECT p.product_id
+                FROM catalog.products p
+                JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                WHERE LOWER(p.brand) = ANY(%s)
+                  AND pr.price BETWEEN %s AND %s
                   AND {stock_filter}
-                ORDER BY like_count DESC, updated_at DESC
+                ORDER BY pr.like_count DESC
                 LIMIT %s
             """
-            # Convert adjacent to lowercase for category fallback
-            adjacent_lower = [adj.lower() for adj in adjacent]
-            params = [adjacent, adjacent_lower] + stock_params + [limit]
+            params = [brands_lower, price_range['min'], price_range['max']] + stock_params + [limit]
         else:
-            sql = """
-                SELECT product_id
-                FROM products
-                WHERE (
-                    subcategory = ANY(%s)
-                    OR LOWER(category) = ANY(%s)
-                )
-                ORDER BY like_count DESC, updated_at DESC
-                LIMIT %s
-            """
-            adjacent_lower = [adj.lower() for adj in adjacent]
-            params = [adjacent, adjacent_lower, limit]
-
-        return self.fetch_val_list(sql, params)
-
-    def get_trending_products(self, limit: int, hours: int = 48) -> List[str]:
-        """
-        Get products with recent engagement (trending).
-        Trending = high like_count AND recent (past 24-48h)
-        """
-        stock_filter, stock_params = self._build_stock_filter_clause()
-
-        if stock_filter:
             sql = f"""
-                SELECT product_id
-                FROM products
-                WHERE parsed_at >= NOW() - INTERVAL '%s hours'
-                  AND like_count > 5
+                SELECT p.product_id
+                FROM catalog.products p
+                JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+                WHERE LOWER(p.brand) = ANY(%s)
                   AND {stock_filter}
-                ORDER BY
-                    like_count DESC,
-                    parsed_at DESC
+                ORDER BY pr.like_count DESC
                 LIMIT %s
             """
-            params = [hours] + stock_params + [limit]
-        else:
-            sql = """
-                SELECT product_id
-                FROM products
-                WHERE parsed_at >= NOW() - INTERVAL '%s hours'
-                  AND like_count > 5
-                ORDER BY
-                    like_count DESC,
-                    parsed_at DESC
-                LIMIT %s
-            """
-            params = [hours, limit]
+            params = [brands_lower] + stock_params + [limit]
 
         return self.fetch_val_list(sql, params)
 
-    def get_random_high_quality(self, limit: int) -> List[str]:
-        """
-        Get truly random products for discovery (serendipity).
-        Only high-quality items (like_count >= 3).
-        """
+    def get_trending_products(self, hours: int = 48, limit: int = 100) -> List[str]:
+        """Get trending products (high likes + recent)."""
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = f"""
-                SELECT product_id
-                FROM products
-                WHERE like_count >= 3
-                  AND {stock_filter}
-                ORDER BY RANDOM()
-                LIMIT %s
-            """
-            params = stock_params + [limit]
-        else:
-            sql = """
-                SELECT product_id
-                FROM products
-                WHERE like_count >= 3
-                ORDER BY RANDOM()
-                LIMIT %s
-            """
-            params = [limit]
-
+        sql = f"""
+            SELECT p.product_id
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE p.parsed_at >= NOW() - INTERVAL '%s hours'
+              AND pr.like_count >= 1
+              AND {stock_filter}
+            ORDER BY pr.like_count DESC, p.parsed_at DESC
+            LIMIT %s
+        """
+        params = [hours] + stock_params + [limit]
         return self.fetch_val_list(sql, params)
 
-    def get_products_paginated(
-        self,
-        offset: int,
-        limit: int,
-        order_by: str = "updated_at"
-    ) -> List[str]:
-        """
-        Get products with offset pagination for exhaustive traversal.
-        """
-        # Validate order_by to prevent SQL injection
-        allowed_orders = ["updated_at", "created_at", "like_count", "price"]
-        if order_by not in allowed_orders:
-            order_by = "updated_at"
-
+    def get_random_high_quality(self, min_likes: int = 3, limit: int = 50) -> List[str]:
+        """Get random high-quality products for serendipity."""
         stock_filter, stock_params = self._build_stock_filter_clause()
 
-        if stock_filter:
-            sql = f"""
-                SELECT product_id
-                FROM products
-                WHERE {stock_filter}
-                ORDER BY {order_by} DESC NULLS LAST, product_id
-                LIMIT %s OFFSET %s
-            """
-            params = stock_params + [limit, offset]
-        else:
-            sql = f"""
-                SELECT product_id
-                FROM products
-                ORDER BY {order_by} DESC NULLS LAST, product_id
-                LIMIT %s OFFSET %s
-            """
-            params = [limit, offset]
-
+        sql = f"""
+            SELECT p.product_id
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE pr.like_count >= %s
+              AND {stock_filter}
+            ORDER BY RANDOM()
+            LIMIT %s
+        """
+        params = [min_likes] + stock_params + [limit]
         return self.fetch_val_list(sql, params)
+
+    def record_like(self, user_id: str, product_id: str) -> bool:
+        """Record a like in engagement.likes table."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("""
+                        INSERT INTO engagement.likes (user_id, product_id)
+                        VALUES (%s, %s)
+                        ON CONFLICT (user_id, product_id) DO NOTHING
+                    """, (user_id, product_id))
+                    conn.commit()
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to record like: {e}")
+                    conn.rollback()
+                    return False
+
+    def remove_like(self, user_id: str, product_id: str) -> bool:
+        """Remove a like from engagement.likes table."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.execute("""
+                        DELETE FROM engagement.likes
+                        WHERE user_id = %s AND product_id = %s
+                    """, (user_id, product_id))
+                    conn.commit()
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to remove like: {e}")
+                    conn.rollback()
+                    return False
+
+    def get_user_likes(self, user_id: str, limit: int = 100) -> List[str]:
+        """Get product IDs liked by a user."""
+        sql = """
+            SELECT product_id FROM engagement.likes
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """
+        return self.fetch_val_list(sql, (user_id, limit))

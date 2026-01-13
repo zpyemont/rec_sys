@@ -1,17 +1,10 @@
 """
-Embedding-based candidate retrieval using pgvector.
+Embedding-based candidate retrieval using pgvector (v2 - normalized schema).
 
-This module replaces the heuristic candidate generation in candidate_sources.py
-with embedding-based similarity search. It uses:
-- pgvector for ANN (Approximate Nearest Neighbor) search
-- Parallel execution for multiple retrieval sources
-- Redis caching for fresh/trending candidates
-
-The retrieval pipeline:
-1. Compute user embedding from liked products
-2. Run parallel retrievers (embedding, fresh, trending, random)
-3. Merge and deduplicate results
-4. Pass to Monolith for ranking
+Uses the new schema structure with JOINs across:
+- catalog.products
+- catalog.product_pricing
+- embeddings.product_vectors
 """
 
 from __future__ import annotations
@@ -38,30 +31,26 @@ async def get_embedding_candidates(
     """
     Retrieve candidates using CLIP embedding similarity via pgvector.
 
-    This single query replaces the 5 heuristic SQL queries in candidate_sources.py.
-    The pgvector <=> operator computes cosine distance efficiently using the HNSW index.
-
     Args:
-        pg: Async PostgreSQL client
-        user_embedding: 512-dim user embedding from get_user_embedding()
+        pg: Async PostgreSQL client (v2)
+        user_embedding: 512-dim user embedding
         shown_set: Set of product IDs already shown to user
         limit: Maximum number of candidates to return
 
     Returns:
         List of product IDs ordered by similarity to user embedding
     """
-    # Convert shown_set to list, limit size to prevent query parameter overflow
     shown_list = list(shown_set)[:10000] if shown_set else []
 
-    # pgvector <=> operator computes cosine distance (smaller = more similar)
     result = await pg.fetch_val_list("""
-        SELECT product_id
-        FROM products
-        WHERE is_active = true
-          AND availability NOT IN ('out of stock', 'sold out')
-          AND image_embedding IS NOT NULL
-          AND ($1::text[] IS NULL OR product_id != ALL($1::text[]))
-        ORDER BY image_embedding <=> $2::vector
+        SELECT e.product_id
+        FROM embeddings.product_vectors e
+        JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
+        WHERE pr.is_active = true
+          AND pr.availability NOT IN ('out of stock', 'sold out')
+          AND e.image_embedding IS NOT NULL
+          AND ($1::text[] IS NULL OR e.product_id != ALL($1::text[]))
+        ORDER BY e.image_embedding <=> $2::vector
         LIMIT $3
     """, [shown_list if shown_list else None, user_embedding.tolist(), limit])
 
@@ -76,40 +65,27 @@ async def get_fresh_candidates(
 ) -> List[str]:
     """
     Get fresh products (cached in Redis, refreshed every 5 min).
-
-    Fresh products are those added/parsed in the last 48 hours,
-    important for discovery and keeping the feed dynamic.
-
-    Args:
-        redis: Async Redis client for caching
-        pg: Async PostgreSQL client
-        limit: Maximum number of candidates to return
-
-    Returns:
-        List of product IDs ordered by recency
     """
-    cache_key = "candidates:fresh"
+    cache_key = "candidates:fresh:v2"
 
-    # Try cache first
     cached = await redis.get(cache_key)
     if cached:
         logger.debug(f"Fresh candidates cache hit ({len(cached)} items)")
         return cached[:limit]
 
-    # Cache miss - query PostgreSQL
     logger.debug("Fresh candidates cache miss, querying PostgreSQL")
 
     fresh = await pg.fetch_val_list("""
-        SELECT product_id
-        FROM products
-        WHERE is_active = true
-          AND availability NOT IN ('out of stock', 'sold out')
-          AND parsed_at >= NOW() - INTERVAL '48 hours'
-        ORDER BY parsed_at DESC
+        SELECT p.product_id
+        FROM catalog.products p
+        JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+        WHERE pr.is_active = true
+          AND pr.availability NOT IN ('out of stock', 'sold out')
+          AND p.parsed_at >= NOW() - INTERVAL '48 hours'
+        ORDER BY p.parsed_at DESC
         LIMIT $1
-    """, [limit * 2])  # Fetch extra for variety
+    """, [limit * 2])
 
-    # Cache result (TTL: 5 minutes)
     if fresh:
         await redis.setex(cache_key, 300, fresh)
 
@@ -123,41 +99,28 @@ async def get_trending_candidates(
 ) -> List[str]:
     """
     Get trending products (cached in Redis, refreshed every 5 min).
-
-    Trending products have high like_count and are recent (48 hours).
-    This provides social proof in the feed.
-
-    Args:
-        redis: Async Redis client for caching
-        pg: Async PostgreSQL client
-        limit: Maximum number of candidates to return
-
-    Returns:
-        List of product IDs ordered by engagement
     """
-    cache_key = "candidates:trending"
+    cache_key = "candidates:trending:v2"
 
-    # Try cache first
     cached = await redis.get(cache_key)
     if cached:
         logger.debug(f"Trending candidates cache hit ({len(cached)} items)")
         return cached[:limit]
 
-    # Cache miss - query PostgreSQL
     logger.debug("Trending candidates cache miss, querying PostgreSQL")
 
     trending = await pg.fetch_val_list("""
-        SELECT product_id
-        FROM products
-        WHERE is_active = true
-          AND availability NOT IN ('out of stock', 'sold out')
-          AND like_count > 5
-          AND parsed_at >= NOW() - INTERVAL '48 hours'
-        ORDER BY like_count DESC, parsed_at DESC
+        SELECT p.product_id
+        FROM catalog.products p
+        JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+        WHERE pr.is_active = true
+          AND pr.availability NOT IN ('out of stock', 'sold out')
+          AND pr.like_count > 5
+          AND p.parsed_at >= NOW() - INTERVAL '48 hours'
+        ORDER BY pr.like_count DESC, p.parsed_at DESC
         LIMIT $1
     """, [limit * 2])
 
-    # Cache result (TTL: 5 minutes)
     if trending:
         await redis.setex(cache_key, 300, trending)
 
@@ -170,42 +133,30 @@ async def get_random_candidates(
 ) -> List[str]:
     """
     Get random high-quality products for exploration.
-
-    Uses TABLESAMPLE for efficient random selection (not ORDER BY RANDOM).
-    Only includes products with like_count >= 3 for quality.
-
-    Args:
-        pg: Async PostgreSQL client
-        limit: Maximum number of candidates to return
-
-    Returns:
-        List of randomly sampled product IDs
     """
-    # TABLESAMPLE is much faster than ORDER BY RANDOM()
-    # BERNOULLI(1) samples ~1% of rows, adjust if needed
     result = await pg.fetch_val_list("""
-        SELECT product_id
-        FROM products TABLESAMPLE BERNOULLI(1)
-        WHERE is_active = true
-          AND availability NOT IN ('out of stock', 'sold out')
-          AND like_count >= 3
+        SELECT p.product_id
+        FROM catalog.products p
+        TABLESAMPLE BERNOULLI(1)
+        JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+        WHERE pr.is_active = true
+          AND pr.availability NOT IN ('out of stock', 'sold out')
+          AND pr.like_count >= 3
         LIMIT $1
     """, [limit])
 
-    # Fallback if TABLESAMPLE returns too few results
     if len(result) < limit // 2:
-        logger.debug("TABLESAMPLE returned few results, using random_bucket fallback")
-        # Use pre-computed random_bucket column
-        bucket = np.random.randint(0, 100)
+        logger.debug("TABLESAMPLE returned few results, using fallback")
         result = await pg.fetch_val_list("""
-            SELECT product_id
-            FROM products
-            WHERE is_active = true
-              AND availability NOT IN ('out of stock', 'sold out')
-              AND like_count >= 3
-              AND random_bucket = $1
-            LIMIT $2
-        """, [bucket, limit])
+            SELECT p.product_id
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE pr.is_active = true
+              AND pr.availability NOT IN ('out of stock', 'sold out')
+              AND pr.like_count >= 3
+            ORDER BY RANDOM()
+            LIMIT $1
+        """, [limit])
 
     logger.debug(f"Retrieved {len(result)} random candidates")
     return result
@@ -226,25 +177,7 @@ async def get_candidates_parallel(
     - 15% fresh products (discovery)
     - 10% trending products (social proof)
     - 5% random (exploration)
-
-    Args:
-        pg: Async PostgreSQL client
-        redis: Async Redis client
-        user_embedding: 512-dim user embedding
-        shown_set: Set of product IDs already shown to user
-        total_limit: Maximum total candidates to return
-
-    Returns:
-        Merged and deduplicated list of product IDs
-
-    Example:
-        ```python
-        user_emb = await get_user_embedding(pg, liked_ids)
-        candidates = await get_candidates_parallel(pg, redis, user_emb, shown_set)
-        # candidates is a list of ~500 product IDs
-        ```
     """
-    # Calculate limits for each retriever
     embedding_limit = int(total_limit * 0.70)
     fresh_limit = int(total_limit * 0.15)
     trending_limit = int(total_limit * 0.10)
@@ -253,16 +186,14 @@ async def get_candidates_parallel(
     logger.info(f"Running parallel retrieval: emb={embedding_limit}, fresh={fresh_limit}, "
                 f"trending={trending_limit}, random={random_limit}")
 
-    # Run ALL retrievers in parallel
     results = await asyncio.gather(
         get_embedding_candidates(pg, user_embedding, shown_set, embedding_limit),
         get_fresh_candidates(redis, pg, fresh_limit),
         get_trending_candidates(redis, pg, trending_limit),
         get_random_candidates(pg, random_limit),
-        return_exceptions=True,  # Don't fail if one retriever fails
+        return_exceptions=True,
     )
 
-    # Handle any exceptions
     embedding_ids = results[0] if not isinstance(results[0], Exception) else []
     fresh_ids = results[1] if not isinstance(results[1], Exception) else []
     trending_ids = results[2] if not isinstance(results[2], Exception) else []
@@ -273,7 +204,6 @@ async def get_candidates_parallel(
             retriever_names = ["embedding", "fresh", "trending", "random"]
             logger.error(f"Retriever {retriever_names[i]} failed: {result}")
 
-    # Merge and deduplicate (preserving order, embedding first for relevance)
     seen: Set[str] = set()
     merged: List[str] = []
 
@@ -296,16 +226,6 @@ async def get_candidates_for_anonymous(
 ) -> List[str]:
     """
     Get candidates for anonymous users (no personalization).
-
-    Uses fresh + trending + random without embedding similarity.
-
-    Args:
-        pg: Async PostgreSQL client
-        redis: Async Redis client
-        total_limit: Maximum total candidates to return
-
-    Returns:
-        List of product IDs
     """
     fresh_limit = int(total_limit * 0.50)
     trending_limit = int(total_limit * 0.35)
@@ -322,7 +242,6 @@ async def get_candidates_for_anonymous(
     trending_ids = results[1] if not isinstance(results[1], Exception) else []
     random_ids = results[2] if not isinstance(results[2], Exception) else []
 
-    # Merge and deduplicate
     seen: Set[str] = set()
     merged: List[str] = []
 
