@@ -39,6 +39,8 @@ class AsyncPostgresClient:
     @classmethod
     def from_settings(cls, settings: Settings) -> "AsyncPostgresClient":
         """Create client from settings."""
+        from urllib.parse import quote
+
         if settings.postgres_dsn:
             # Convert psycopg2-style DSN to asyncpg-style URL
             dsn = cls._convert_dsn_to_url(settings.postgres_dsn)
@@ -46,7 +48,7 @@ class AsyncPostgresClient:
             host = settings.pg_host or "localhost"
             port = settings.pg_port or 5432
             user = settings.pg_user or "postgres"
-            password = settings.pg_password or ""
+            password = quote(settings.pg_password or "", safe="")
             database = settings.pg_database or "product"
             dsn = f"postgresql://{user}:{password}@{host}:{port}/{database}"
         return cls(dsn)
@@ -54,6 +56,8 @@ class AsyncPostgresClient:
     @staticmethod
     def _convert_dsn_to_url(dsn: str) -> str:
         """Convert psycopg2-style DSN to asyncpg-style URL."""
+        from urllib.parse import quote
+
         # If already a URL, return as-is
         if dsn.startswith("postgresql://") or dsn.startswith("postgres://"):
             return dsn
@@ -68,7 +72,7 @@ class AsyncPostgresClient:
         host = parts.get("host", "localhost")
         port = parts.get("port", "5432")
         user = parts.get("user", "postgres")
-        password = parts.get("password", "")
+        password = quote(parts.get("password", ""), safe="")
         dbname = parts.get("dbname", "product")
 
         return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
