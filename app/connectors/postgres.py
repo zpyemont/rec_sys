@@ -6,6 +6,7 @@ import contextlib
 
 import psycopg2  # type: ignore
 import psycopg2.extras  # type: ignore
+import psycopg2.pool  # type: ignore
 
 try:
     import asyncpg  # type: ignore
@@ -29,12 +30,13 @@ class AsyncPostgresClient:
     This client is used by the retrieval module for embedding-based
     candidate generation with pgvector.
     """
+    _pool = None  # Class-level pool (singleton)
+    _pool_dsn = None
 
     def __init__(self, dsn: str):
         if asyncpg is None:
             raise RuntimeError("asyncpg not available. Install with: pip install asyncpg")
         self._dsn = dsn
-        self._pool = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "AsyncPostgresClient":
@@ -78,15 +80,18 @@ class AsyncPostgresClient:
         return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
     async def get_pool(self):
-        """Lazy-initialize the connection pool."""
-        if self._pool is None:
-            self._pool = await asyncpg.create_pool(
+        """Lazy-initialize the connection pool (singleton)."""
+        if AsyncPostgresClient._pool is None or AsyncPostgresClient._pool_dsn != self._dsn:
+            if AsyncPostgresClient._pool is not None:
+                await AsyncPostgresClient._pool.close()
+            AsyncPostgresClient._pool = await asyncpg.create_pool(
                 self._dsn,
-                min_size=2,
-                max_size=10,
+                min_size=1,
+                max_size=5,
             )
-            logger.info("AsyncPostgresClient pool created")
-        return self._pool
+            AsyncPostgresClient._pool_dsn = self._dsn
+            logger.info("AsyncPostgresClient pool created (max=5)")
+        return AsyncPostgresClient._pool
 
     async def fetch_all(self, sql: str, params: Optional[List] = None) -> List[Dict[str, Any]]:
         """
@@ -192,9 +197,26 @@ class AsyncPostgresClient:
 
 
 class PostgresClient:
+    _pool = None  # Class-level connection pool (singleton)
+    _pool_dsn = None
+
     def __init__(self, dsn: str, settings: Optional[Settings] = None):
         self._dsn = dsn
         self._settings = settings
+        self._init_pool()
+
+    def _init_pool(self):
+        """Initialize the connection pool (singleton)."""
+        if PostgresClient._pool is None or PostgresClient._pool_dsn != self._dsn:
+            if PostgresClient._pool is not None:
+                PostgresClient._pool.closeall()
+            PostgresClient._pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=5,
+                dsn=self._dsn
+            )
+            PostgresClient._pool_dsn = self._dsn
+            logger.info("PostgresClient connection pool created (max=5)")
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "PostgresClient":
@@ -211,12 +233,12 @@ class PostgresClient:
 
     @contextlib.contextmanager
     def _get_conn(self):
-        conn = psycopg2.connect(self._dsn)
+        conn = PostgresClient._pool.getconn()
         try:
             yield conn
         finally:
             try:
-                conn.close()
+                PostgresClient._pool.putconn(conn)
             except Exception:
                 pass
 
