@@ -68,7 +68,7 @@ class HybridSearcher:
     HYBRID_SEARCH_SQL = """
         WITH
         text_search AS (
-            SELECT product_id,
+            SELECT e.product_id,
                    ROW_NUMBER() OVER (ORDER BY e.text_embedding <=> $1::vector) as rank
             FROM embeddings.product_vectors e
             JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
@@ -77,7 +77,7 @@ class HybridSearcher:
             LIMIT $4
         ),
         image_search AS (
-            SELECT product_id,
+            SELECT e.product_id,
                    ROW_NUMBER() OVER (ORDER BY e.image_embedding <=> $2::vector) as rank
             FROM embeddings.product_vectors e
             JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
