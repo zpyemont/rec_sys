@@ -16,6 +16,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _to_pgvector(embedding: List[float]) -> str:
+    """Convert embedding list to pgvector string format."""
+    return "[" + ",".join(str(x) for x in embedding) + "]"
+
+
 class EmbeddingService:
     """Client for the parser embedding service."""
 
@@ -233,14 +238,14 @@ class HybridSearcher:
         rows = await self.pg.fetch_all(
             self.HYBRID_SEARCH_SQL,
             [
-                text_emb,           # $1 - text embedding
-                image_emb,          # $2 - image embedding
-                query,              # $3 - keyword query
-                candidate_limit,    # $4 - per-method candidate limit
-                text_weight,        # $5 - text search weight
-                image_weight,       # $6 - image search weight
-                keyword_weight,     # $7 - keyword search weight
-                limit,              # $8 - final result limit
+                _to_pgvector(text_emb),   # $1 - text embedding
+                _to_pgvector(image_emb),  # $2 - image embedding
+                query,                     # $3 - keyword query
+                candidate_limit,           # $4 - per-method candidate limit
+                text_weight,               # $5 - text search weight
+                image_weight,              # $6 - image search weight
+                keyword_weight,            # $7 - keyword search weight
+                limit,                     # $8 - final result limit
             ]
         )
 
@@ -250,7 +255,7 @@ class HybridSearcher:
         """Execute semantic text search only."""
         rows = await self.pg.fetch_all(
             self.SEMANTIC_SEARCH_SQL,
-            [text_embedding, limit]
+            [_to_pgvector(text_embedding), limit]
         )
         return [row["product_id"] for row in rows]
 
@@ -258,7 +263,7 @@ class HybridSearcher:
         """Execute visual search (CLIP text-to-image) only."""
         rows = await self.pg.fetch_all(
             self.VISUAL_SEARCH_SQL,
-            [image_embedding, limit]
+            [_to_pgvector(image_embedding), limit]
         )
         return [row["product_id"] for row in rows]
 
