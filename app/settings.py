@@ -220,6 +220,12 @@ class Settings(BaseSettings):
         "soldout"
     ]
 
+    # Hybrid search settings
+    search_rrf_k: int = 60  # RRF constant (lower = more weight to top ranks)
+    search_candidate_multiplier: int = 5  # Fetch 5x limit from each method before fusion
+    search_default_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)  # text, image, keyword
+    embedding_service_url: str = "http://parser:8080"  # Parser service URL for embeddings
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -80,3 +80,24 @@ class TrackResponse(BaseModel):
     status: str
     request_id: int
     message: Optional[str] = None
+
+
+# Search schemas
+class SearchResponse(BaseModel):
+    """Response from hybrid search endpoint."""
+    query: str
+    results: List[ProductItem]
+    total: int
+    mode: str  # "hybrid", "semantic", "visual", "keyword"
+    latency_ms: float
+
+
+class EmbedRequest(BaseModel):
+    """Request to generate embeddings for a query."""
+    query: str
+
+
+class EmbedResponse(BaseModel):
+    """Response with generated embeddings."""
+    text_embedding: Optional[List[float]] = None   # 768-dim Marqo
+    image_embedding: Optional[List[float]] = None  # 512-dim CLIP

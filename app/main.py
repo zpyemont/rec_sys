@@ -14,6 +14,7 @@ from .schemas import (
     CollectionsResponse,
     TrackRequest,
     TrackResponse,
+    SearchResponse,
 )
 
 # Firestore for shown-set history
@@ -64,6 +65,9 @@ from .ranker.session_embedding import (
     STAGE_BRAND_NEW,
     STAGE_BROWSING,
 )
+
+# Hybrid search
+from .ranker.search import HybridSearcher, EmbeddingService
 
 from .utils import generate_request_id
 
@@ -849,6 +853,102 @@ def _get_diverse_feed_legacy(
         shown_count=shown_count,
         total_count=total_products,
         tier=tier
+    )
+
+
+@app.get("/search", response_model=SearchResponse)
+async def search(
+    q: str = Query(..., description="Search query"),
+    limit: int = Query(20, ge=1, le=100, description="Number of results to return"),
+    mode: str = Query("hybrid", description="Search mode: hybrid, semantic, visual, keyword"),
+    weights: str = Query("1,1,1", description="Comma-separated weights: text,image,keyword"),
+) -> SearchResponse:
+    """
+    Hybrid product search combining semantic, visual, and keyword search.
+
+    Modes:
+    - hybrid: Combines all three search methods using RRF fusion (default)
+    - semantic: Text embedding similarity search (768-dim Marqo embeddings)
+    - visual: Cross-modal text-to-image search (512-dim CLIP embeddings)
+    - keyword: PostgreSQL full-text search (tsvector/BM25-style ranking)
+
+    Weights control the relative importance of each search method in hybrid mode.
+    Format: "text_weight,image_weight,keyword_weight" (e.g., "1,1,1" for equal)
+    """
+    # Parse weights
+    try:
+        weight_parts = weights.split(",")
+        if len(weight_parts) != 3:
+            raise ValueError("Expected 3 weights")
+        weight_tuple = tuple(float(w) for w in weight_parts)
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Invalid weights '{weights}', using defaults: {e}")
+        weight_tuple = settings.search_default_weights
+
+    # Validate mode
+    valid_modes = {"hybrid", "semantic", "visual", "keyword"}
+    if mode not in valid_modes:
+        logger.warning(f"Invalid mode '{mode}', defaulting to 'hybrid'")
+        mode = "hybrid"
+
+    # Initialize clients
+    async_pg = AsyncPostgresClient.from_settings(settings)
+    pg_client = PostgresClient.from_settings(settings)
+    embedding_service = EmbeddingService(settings.embedding_service_url)
+
+    # Create searcher
+    searcher = HybridSearcher(
+        pg_client=async_pg,
+        embedding_service=embedding_service,
+        rrf_k=settings.search_rrf_k,
+        candidate_multiplier=settings.search_candidate_multiplier,
+    )
+
+    # Execute search
+    product_ids, latency_ms = await searcher.search(
+        query=q,
+        limit=limit,
+        mode=mode,
+        weights=weight_tuple,
+    )
+
+    # Fetch product metadata
+    if product_ids:
+        product_metadata = await async_pg.get_product_metadata_for_ids(product_ids)
+    else:
+        product_metadata = {}
+
+    # Build response items (preserve search order)
+    items = [
+        ProductItem(
+            id=pid,
+            title=meta.get("title"),
+            price=meta.get("price"),
+            compare_at_price=meta.get("compare_at_price"),
+            images=meta.get("images", []),
+            image_has_text=meta.get("image_has_text"),
+            category=meta.get("category"),
+            subcategory=meta.get("subcategory"),
+            like_count=meta.get("like_count", 0),
+            description=meta.get("description"),
+            url=meta.get("url"),
+            brand=meta.get("brand"),
+            created_at=meta.get("created_at"),
+            currency=meta.get("currency"),
+            availability=meta.get("availability")
+        )
+        for pid in product_ids
+        if (meta := product_metadata.get(pid))
+    ]
+
+    logger.info(f"Search completed: query='{q}', mode={mode}, results={len(items)}, latency={latency_ms:.1f}ms")
+
+    return SearchResponse(
+        query=q,
+        results=items,
+        total=len(items),
+        mode=mode,
+        latency_ms=latency_ms,
     )
 
 
