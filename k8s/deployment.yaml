@@ -53,9 +53,10 @@ spec:
           value: "products"
         - name: GCS_BUCKET_PRODUCTS
           value: "looksy_shopify_parsed"
-        # Parser VM worker internal load balancer (get IP from: terraform output parser_embed_ip)
+        # Parser VM worker internal IP (direct, cross-region works; ILB is regional only)
+        # TODO: Move parser to europe-west1 or use global LB for HA
         - name: EMBEDDING_SERVICE_URL
-          value: "http://10.154.15.219:8080"
+          value: "http://10.154.15.218:8080"
         readinessProbe:
           httpGet:
             path: /healthz
