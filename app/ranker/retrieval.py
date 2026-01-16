@@ -81,7 +81,7 @@ async def get_fresh_candidates(
         JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
         WHERE pr.is_active = true
           AND pr.availability NOT IN ('out of stock', 'sold out')
-          AND p.parsed_at >= NOW() - INTERVAL '48 hours'
+          AND p.parsed_at >= NOW() - INTERVAL '7 days'
         ORDER BY p.parsed_at DESC
         LIMIT $1
     """, [limit * 2])
@@ -115,8 +115,8 @@ async def get_trending_candidates(
         JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
         WHERE pr.is_active = true
           AND pr.availability NOT IN ('out of stock', 'sold out')
-          AND pr.like_count > 5
-          AND p.parsed_at >= NOW() - INTERVAL '48 hours'
+          AND pr.like_count >= 0
+          AND p.parsed_at >= NOW() - INTERVAL '7 days'
         ORDER BY pr.like_count DESC, p.parsed_at DESC
         LIMIT $1
     """, [limit * 2])
@@ -141,7 +141,6 @@ async def get_random_candidates(
         JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
         WHERE pr.is_active = true
           AND pr.availability NOT IN ('out of stock', 'sold out')
-          AND pr.like_count >= 3
         LIMIT $1
     """, [limit])
 
@@ -153,7 +152,6 @@ async def get_random_candidates(
             JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
             WHERE pr.is_active = true
               AND pr.availability NOT IN ('out of stock', 'sold out')
-              AND pr.like_count >= 3
             ORDER BY RANDOM()
             LIMIT $1
         """, [limit])
