@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 
-from .user_embedding import EMBEDDING_DIM, get_global_average_embedding, get_user_embedding
+from .user_embedding import EMBEDDING_DIM, get_user_embedding
 
 if TYPE_CHECKING:
     from ..connectors.postgres import AsyncPostgresClient

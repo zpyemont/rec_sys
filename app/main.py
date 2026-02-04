@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any
+from typing import List, Dict
 import time
 import logging
 
@@ -30,7 +30,6 @@ from .connectors.tfs_client import get_monolith_client
 
 # Old heuristic candidate sources (legacy)
 from .ranker.candidate_sources import (
-    query_popular_ids,
     query_recent_ids,
     query_top_by_category,
     fetch_freshness_metrics,
@@ -49,14 +48,12 @@ from .ranker.model import score_with_model_or_fallback
 
 # New embedding-based retrieval
 from .ranker.retrieval import get_candidates_parallel, get_candidates_for_anonymous
-from .ranker.user_embedding import get_user_embedding
 
 # Session-aware features
 from .connectors.session_store import (
     record_view as session_record_view,
     get_session_positive_products,
     get_session_engagement_map,
-    get_session_stats,
 )
 from .ranker.session_embedding import (
     get_blended_user_embedding,
@@ -505,13 +502,13 @@ async def _get_diverse_feed_embedding(
             )
         elif cold_start_stage == STAGE_BRAND_NEW:
             # Brand new user - exploration mode
-            logger.info(f"Cold-start BRAND_NEW: exploration mode")
+            logger.info("Cold-start BRAND_NEW: exploration mode")
             candidates = await get_candidates_for_anonymous(
                 async_pg, async_redis, total_limit=500
             )
         elif cold_start_stage == STAGE_BROWSING:
             # Has session signals but no likes - use session embedding
-            logger.info(f"Cold-start BROWSING: using session signals only")
+            logger.info("Cold-start BROWSING: using session signals only")
             session_emb = await get_session_embedding(
                 async_pg, session_product_ids, engagement_scores
             )

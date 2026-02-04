@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
-from collections import Counter, deque
+from collections import deque
 
 
 def filter_seen_pairs(bucket_list: List[Tuple[str, float]], shown_set: set[str]) -> List[Tuple[str, float]]:

@@ -9,7 +9,7 @@ Combines three search methods:
 
 import logging
 import time
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple
 
 import httpx
 

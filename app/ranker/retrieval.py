@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Set, Optional, TYPE_CHECKING
+from typing import List, Set, TYPE_CHECKING
 
 import numpy as np
 
