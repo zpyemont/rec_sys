@@ -53,7 +53,7 @@ async def get_session_embedding(
     # Fetch embeddings for session products
     result = await pg.fetch_all(
         """
-        SELECT e.product_id, e.image_embedding::float[] as embedding
+        SELECT e.product_id, e.image_embedding::real[] as embedding
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.product_id = ANY($1)

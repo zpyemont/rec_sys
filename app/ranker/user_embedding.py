@@ -47,7 +47,7 @@ async def get_global_average_embedding(pg: "AsyncPostgresClient") -> np.ndarray:
 
     # pgvector supports AVG() on vector types
     result = await pg.fetch_all("""
-        SELECT AVG(e.image_embedding)::float[] as avg_emb
+        SELECT AVG(e.image_embedding)::real[] as avg_emb
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.image_embedding IS NOT NULL
@@ -99,7 +99,7 @@ async def get_user_embedding(
     recent_likes = liked_product_ids[:100]
 
     result = await pg.fetch_all("""
-        SELECT e.image_embedding::float[] as embedding
+        SELECT e.image_embedding::real[] as embedding
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.product_id = ANY($1)
@@ -155,7 +155,7 @@ async def get_user_embedding_weighted(
     # Fetch embeddings
     recent_likes = liked_product_ids[:100]
     result = await pg.fetch_all("""
-        SELECT e.product_id, e.image_embedding::float[] as embedding
+        SELECT e.product_id, e.image_embedding::real[] as embedding
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.product_id = ANY($1)
