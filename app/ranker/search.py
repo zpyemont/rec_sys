@@ -102,9 +102,9 @@ class HybridSearcher:
         )
         SELECT
             COALESCE(t.product_id, i.product_id, k.product_id) as product_id,
-            (COALESCE(rrf_score(t.rank), 0) * $5 +
-             COALESCE(rrf_score(i.rank), 0) * $6 +
-             COALESCE(rrf_score(k.rank), 0) * $7) as score
+            (COALESCE(1.0 / ($9 + t.rank), 0) * $5 +
+             COALESCE(1.0 / ($9 + i.rank), 0) * $6 +
+             COALESCE(1.0 / ($9 + k.rank), 0) * $7) as score
         FROM text_search t
         FULL OUTER JOIN image_search i ON t.product_id = i.product_id
         FULL OUTER JOIN keyword_search k ON COALESCE(t.product_id, i.product_id) = k.product_id
@@ -246,6 +246,7 @@ class HybridSearcher:
                 image_weight,              # $6 - image search weight
                 keyword_weight,            # $7 - keyword search weight
                 limit,                     # $8 - final result limit
+                self.rrf_k,               # $9 - RRF k constant
             ]
         )
 
