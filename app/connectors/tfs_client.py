@@ -18,8 +18,8 @@ class MonolithClient:
     def __init__(
         self,
         host: str,
-        port: int = 8500,
-        model_name: str = 'fashion_ranking',
+        port: int = 2223,
+        model_name: str = 'fashion_two_tower',
         timeout: float = 5.0
     ):
         self.host = host
@@ -44,8 +44,8 @@ class MonolithClient:
 
         Returns:
             Tuple of:
-            - user_embedding: 32-dim numpy array
-            - product_embeddings: dict mapping product_id -> 32-dim embedding
+            - user_embedding: 128-dim numpy array
+            - product_embeddings: dict mapping product_id -> 128-dim embedding
             - scores: dict mapping product_id -> score
 
         Raises:
@@ -53,7 +53,7 @@ class MonolithClient:
         """
         if not product_ids:
             logger.warning("Empty product_ids list provided")
-            return np.zeros(32), {}, {}
+            return np.zeros(128), {}, {}
 
         # Convert IDs to int64 (Monolith uses hash of string IDs)
         user_id_hash = self._hash_id(user_id)
@@ -147,16 +147,16 @@ class MonolithClient:
             result: PredictResponse from TensorFlow Serving
 
         Returns:
-            32-dim numpy array
+            128-dim numpy array
         """
         try:
-            # User embedding should be shape (batch_size, 32)
+            # User embedding should be shape (batch_size, 128)
             # We take the first one since all examples have the same user
             user_emb_array = tf.make_ndarray(result.outputs['user_embedding'])
-            return user_emb_array[0]  # Shape: (32,)
+            return user_emb_array[0]  # Shape: (128,)
         except KeyError:
             logger.error("'user_embedding' not found in model outputs")
-            return np.zeros(32)
+            return np.zeros(128)
 
     def _extract_product_embeddings(
         self,
@@ -171,10 +171,10 @@ class MonolithClient:
             product_ids: Original product IDs (to map back)
 
         Returns:
-            Dict mapping product_id -> 32-dim embedding
+            Dict mapping product_id -> 128-dim embedding
         """
         try:
-            # Product embeddings: shape (batch_size, 32)
+            # Product embeddings: shape (batch_size, 128)
             product_embs_array = tf.make_ndarray(result.outputs['product_embedding'])
 
             # Map back to product IDs
@@ -184,7 +184,7 @@ class MonolithClient:
             }
         except KeyError:
             logger.error("'product_embedding' not found in model outputs")
-            return {pid: np.zeros(32) for pid in product_ids}
+            return {pid: np.zeros(128) for pid in product_ids}
 
     def _extract_scores(self, result, product_ids: List[str]) -> Dict[str, float]:
         """

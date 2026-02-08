@@ -17,8 +17,50 @@ def query_top_by_category(pg: PostgresClient, cat: str, limit: int = 200) -> Lis
     return pg.get_by_brand_or_vendor(cat=cat, limit=limit)
 
 
-def fetch_freshness_metrics(prod_ids: List[str]) -> Dict[str, float]:
-    return {str(pid): 1.0 for pid in prod_ids}
+def fetch_freshness_metrics(prod_ids: List[str], pg: PostgresClient | None = None) -> Dict[str, float]:
+    """
+    Calculate freshness scores for products based on creation timestamps.
+
+    Uses exponential decay: score = exp(-hours_old / half_life)
+    - Products created now get score ~1.0
+    - Products 24 hours old get score ~0.5 (half-life)
+    - Products 72 hours old get score ~0.125
+    - Products 168 hours (7 days) old get score ~0.007
+
+    If no PostgresClient provided, falls back to constant 1.0 (all equally fresh).
+    """
+    import math
+
+    if not prod_ids:
+        return {}
+
+    # Fallback if no database client provided
+    if pg is None:
+        return {str(pid): 1.0 for pid in prod_ids}
+
+    try:
+        # Get hours since creation for each product
+        hours_old = pg.get_freshness_timestamps(prod_ids)
+
+        # Exponential decay with 24-hour half-life
+        HALF_LIFE_HOURS = 24.0
+        decay_rate = math.log(2) / HALF_LIFE_HOURS  # ~0.0289
+
+        result = {}
+        for pid in prod_ids:
+            pid_str = str(pid)
+            age_hours = hours_old.get(pid_str, 0.0)
+            # Exponential decay: fresher products score higher
+            score = math.exp(-decay_rate * age_hours)
+            # Clamp to [0.01, 1.0] to avoid complete zero scores
+            result[pid_str] = max(0.01, min(1.0, score))
+
+        return result
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"fetch_freshness_metrics failed: {e}, using fallback")
+        return {str(pid): 1.0 for pid in prod_ids}
 
 
 def fetch_features_for_ids(prod_ids: List[str]) -> Dict[str, Any]:

@@ -1,5 +1,5 @@
 from functools import lru_cache
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -10,6 +10,8 @@ class BucketRatios(BaseModel):
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
+
     service_port: int = 8500
 
     # Redis
@@ -191,21 +193,24 @@ class Settings(BaseSettings):
         'jewelry': ['Necklaces', 'Earrings', 'Bracelets', 'Rings'],
     }
 
-    # Kafka (Confluent Cloud)
-    kafka_bootstrap_servers: str = "pkc-619z3.us-east1.gcp.confluent.cloud:9092"
-    kafka_api_key: str = "DGCM2ZPZ5T2ZUKFE"
-    kafka_api_secret: str = ""  # Set via environment variable
+    # Kafka (Confluent Cloud) - all values must be set via environment variables
+    kafka_bootstrap_servers: str | None = None  # Set via KAFKA_BOOTSTRAP_SERVERS env var
+    kafka_api_key: str | None = None  # Set via KAFKA_API_KEY env var
+    kafka_api_secret: str | None = None  # Set via KAFKA_API_SECRET env var
     kafka_enabled: bool = False  # Feature flag to enable Kafka publishing
 
     # Monolith TensorFlow Serving
     monolith_host: str = "localhost"
-    monolith_port: int = 8500
-    monolith_model_name: str = "fashion_ranking"
+    monolith_port: int = 2223
+    monolith_model_name: str = "fashion_two_tower"
     monolith_timeout: float = 5.0
     monolith_enabled: bool = False  # Feature flag to enable Monolith integration
 
     # Embedding-based retrieval (pgvector)
     embedding_retrieval_enabled: bool = True  # Use embedding retrieval instead of heuristic buckets
+
+    # Two-tower learned embeddings (128-dim) vs CLIP (512-dim)
+    use_learned_embeddings: bool = False  # Use two-tower learned embeddings instead of CLIP
 
     # Worker ID for request ID generation (for distributed deployments)
     worker_id: int = 1
@@ -225,10 +230,6 @@ class Settings(BaseSettings):
     search_candidate_multiplier: int = 5  # Fetch 5x limit from each method before fusion
     search_default_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)  # text, image, keyword
     embedding_service_url: str = "http://parser:8080"  # Parser service URL for embeddings
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 @lru_cache()

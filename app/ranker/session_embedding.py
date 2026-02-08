@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 
-from .user_embedding import EMBEDDING_DIM, get_user_embedding
+from .user_embedding import EMBEDDING_DIM, LEARNED_EMBEDDING_DIM, get_user_embedding
 
 if TYPE_CHECKING:
     from ..connectors.postgres import AsyncPostgresClient
@@ -29,6 +29,7 @@ async def get_session_embedding(
     pg: "AsyncPostgresClient",
     session_product_ids: List[str],
     engagement_scores: Dict[str, float],
+    use_learned: bool = False,
 ) -> Optional[np.ndarray]:
     """
     Compute session embedding from positively-engaged products.
@@ -40,9 +41,10 @@ async def get_session_embedding(
         pg: Async PostgreSQL client
         session_product_ids: Product IDs with positive engagement in this session
         engagement_scores: Dict mapping product_id -> engagement score
+        use_learned: If True, use learned_embedding (128-dim); else image_embedding (512-dim)
 
     Returns:
-        512-dim weighted average embedding, or None if no valid products
+        Weighted average embedding, or None if no valid products
     """
     if not session_product_ids:
         return None
@@ -51,13 +53,14 @@ async def get_session_embedding(
     products_to_fetch = session_product_ids[:50]
 
     # Fetch embeddings for session products
+    emb_col = "learned_embedding" if use_learned else "image_embedding"
     result = await pg.fetch_all(
-        """
-        SELECT e.product_id, e.image_embedding::real[] as embedding
+        f"""
+        SELECT e.product_id, e.{emb_col}::real[] as embedding
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.product_id = ANY($1)
-          AND e.image_embedding IS NOT NULL
+          AND e.{emb_col} IS NOT NULL
           AND pr.is_active = true
         """,
         [products_to_fetch],
@@ -98,7 +101,8 @@ async def get_session_embedding(
     weights = weights / weights.sum()
 
     # Compute weighted average
-    session_embedding = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    dim = LEARNED_EMBEDDING_DIM if use_learned else EMBEDDING_DIM
+    session_embedding = np.zeros(dim, dtype=np.float32)
     for emb, weight in zip(embeddings, weights):
         session_embedding += weight * emb
 
@@ -113,6 +117,7 @@ async def get_blended_user_embedding(
     engagement_scores: Dict[str, float],
     base_alpha: float = 0.7,
     decay_factor: float = 0.9,
+    use_learned: bool = False,
 ) -> np.ndarray:
     """
     Blend long-term and session embeddings with adaptive weighting.
@@ -134,15 +139,16 @@ async def get_blended_user_embedding(
         engagement_scores: Dict mapping product_id -> engagement score
         base_alpha: Starting weight for long-term embedding (default 0.7 = 70%)
         decay_factor: How much to reduce long-term weight per session product
+        use_learned: If True, use learned_embedding (128-dim); else image_embedding (512-dim)
 
     Returns:
-        512-dim blended user embedding, normalized
+        Blended user embedding, normalized
     """
     # Get long-term embedding (from all-time likes)
-    long_term_emb = await get_user_embedding(pg, liked_product_ids)
+    long_term_emb = await get_user_embedding(pg, liked_product_ids, use_learned=use_learned)
 
     # Get session embedding (from this session's positive products)
-    session_emb = await get_session_embedding(pg, session_product_ids, engagement_scores)
+    session_emb = await get_session_embedding(pg, session_product_ids, engagement_scores, use_learned=use_learned)
 
     # If no session data, return long-term only
     if session_emb is None:

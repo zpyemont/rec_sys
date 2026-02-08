@@ -1,9 +1,9 @@
 """
 User embedding computation for personalized candidate retrieval.
 
-This module computes user embeddings by averaging the CLIP embeddings
-of products the user has liked. For cold-start users (no likes),
-it falls back to a global average embedding.
+Computes user embeddings by averaging product embeddings from liked items.
+Supports both CLIP (512-dim) and two-tower learned (128-dim) embeddings.
+For cold-start users (no likes), falls back to a global average embedding.
 """
 
 from __future__ import annotations
@@ -21,11 +21,15 @@ logger = logging.getLogger(__name__)
 # Global average embedding for cold-start users (lazy-loaded)
 _GLOBAL_AVG_EMBEDDING: Optional[np.ndarray] = None
 
-# Embedding dimension (CLIP produces 512-dim embeddings)
-EMBEDDING_DIM = 512
+# Embedding dimensions
+EMBEDDING_DIM = 512       # CLIP image embeddings
+LEARNED_EMBEDDING_DIM = 128  # Two-tower learned embeddings
 
 
-async def get_global_average_embedding(pg: "AsyncPostgresClient") -> np.ndarray:
+async def get_global_average_embedding(
+    pg: "AsyncPostgresClient",
+    use_learned: bool = False,
+) -> np.ndarray:
     """
     Get the global average embedding across all products.
 
@@ -34,23 +38,26 @@ async def get_global_average_embedding(pg: "AsyncPostgresClient") -> np.ndarray:
 
     Args:
         pg: Async PostgreSQL client
+        use_learned: If True, use learned_embedding (128-dim); else image_embedding (512-dim)
 
     Returns:
-        512-dim numpy array representing the average product embedding
+        numpy array representing the average product embedding
     """
     global _GLOBAL_AVG_EMBEDDING
 
     if _GLOBAL_AVG_EMBEDDING is not None:
         return _GLOBAL_AVG_EMBEDDING
 
-    logger.info("Computing global average embedding (one-time)")
+    emb_col = "learned_embedding" if use_learned else "image_embedding"
+    dim = LEARNED_EMBEDDING_DIM if use_learned else EMBEDDING_DIM
 
-    # pgvector supports AVG() on vector types
-    result = await pg.fetch_all("""
-        SELECT AVG(e.image_embedding)::real[] as avg_emb
+    logger.info(f"Computing global average embedding (one-time, col={emb_col})")
+
+    result = await pg.fetch_all(f"""
+        SELECT AVG(e.{emb_col})::real[] as avg_emb
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
-        WHERE e.image_embedding IS NOT NULL
+        WHERE e.{emb_col} IS NOT NULL
           AND pr.is_active = true
     """)
 
@@ -58,9 +65,8 @@ async def get_global_average_embedding(pg: "AsyncPostgresClient") -> np.ndarray:
         _GLOBAL_AVG_EMBEDDING = np.array(result[0]['avg_emb'], dtype=np.float32)
         logger.info(f"Global average embedding computed: shape {_GLOBAL_AVG_EMBEDDING.shape}")
     else:
-        # Fallback to zero vector if no embeddings exist
         logger.warning("No embeddings found, using zero vector as fallback")
-        _GLOBAL_AVG_EMBEDDING = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        _GLOBAL_AVG_EMBEDDING = np.zeros(dim, dtype=np.float32)
 
     return _GLOBAL_AVG_EMBEDDING
 
@@ -68,62 +74,58 @@ async def get_global_average_embedding(pg: "AsyncPostgresClient") -> np.ndarray:
 async def get_user_embedding(
     pg: "AsyncPostgresClient",
     liked_product_ids: List[str],
+    use_learned: bool = False,
 ) -> np.ndarray:
     """
-    Compute user embedding as the average of liked product CLIP embeddings.
+    Compute user embedding as the average of liked product embeddings.
 
     For users with no likes (cold-start), returns the global average embedding.
-    This provides a reasonable starting point for recommendation.
 
     Args:
         pg: Async PostgreSQL client
         liked_product_ids: List of product IDs the user has liked
+        use_learned: If True, use learned_embedding (128-dim); else image_embedding (512-dim)
 
     Returns:
-        512-dim numpy array representing the user's embedding
-
-    Example:
-        ```python
-        liked_ids = ["prod_123", "prod_456", "prod_789"]
-        user_emb = await get_user_embedding(pg, liked_ids)
-        # user_emb.shape = (512,)
-        ```
+        numpy array representing the user's embedding
     """
-    # Cold-start: no likes, use global average
     if not liked_product_ids:
         logger.debug("Cold-start user, using global average embedding")
-        return await get_global_average_embedding(pg)
+        return await get_global_average_embedding(pg, use_learned=use_learned)
 
-    # Fetch embeddings for liked products
-    # Limit to most recent 100 likes to avoid query overhead
     recent_likes = liked_product_ids[:100]
+    emb_col = "learned_embedding" if use_learned else "image_embedding"
 
-    result = await pg.fetch_all("""
-        SELECT e.image_embedding::real[] as embedding
+    result = await pg.fetch_all(f"""
+        SELECT e.{emb_col}::real[] as embedding
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.product_id = ANY($1)
-          AND e.image_embedding IS NOT NULL
+          AND e.{emb_col} IS NOT NULL
           AND pr.is_active = true
     """, [recent_likes])
 
     if not result:
         logger.debug(f"No embeddings found for {len(recent_likes)} liked products, using global average")
-        return await get_global_average_embedding(pg)
+        return await get_global_average_embedding(pg, use_learned=use_learned)
 
-    # Average the embeddings
     embeddings = [np.array(row['embedding'], dtype=np.float32) for row in result]
-    user_embedding = np.mean(embeddings, axis=0)
+    avg = np.mean(embeddings, axis=0)
 
-    logger.debug(f"Computed user embedding from {len(embeddings)} liked products")
+    # L2 normalize for cosine similarity (important for learned embeddings)
+    norm = np.linalg.norm(avg)
+    if norm > 0:
+        avg = avg / norm
 
-    return user_embedding
+    logger.debug(f"Computed user embedding from {len(embeddings)} liked products (col={emb_col})")
+    return avg
 
 
 async def get_user_embedding_weighted(
     pg: "AsyncPostgresClient",
     liked_product_ids: List[str],
     recency_weights: Optional[List[float]] = None,
+    use_learned: bool = False,
 ) -> np.ndarray:
     """
     Compute user embedding with optional recency weighting.
@@ -135,42 +137,41 @@ async def get_user_embedding_weighted(
         pg: Async PostgreSQL client
         liked_product_ids: List of product IDs (ordered by recency, most recent first)
         recency_weights: Optional weights for each like (same length as liked_product_ids)
+        use_learned: If True, use learned_embedding (128-dim); else image_embedding (512-dim)
 
     Returns:
-        512-dim numpy array representing the user's embedding
+        numpy array representing the user's embedding
     """
     if not liked_product_ids:
-        return await get_global_average_embedding(pg)
+        return await get_global_average_embedding(pg, use_learned=use_learned)
 
-    # Default: exponential decay weights (more recent = higher weight)
     if recency_weights is None:
         n = min(len(liked_product_ids), 100)
         decay_rate = 0.95
         recency_weights = [decay_rate ** i for i in range(n)]
 
-    # Normalize weights
     weight_sum = sum(recency_weights[:len(liked_product_ids)])
     normalized_weights = [w / weight_sum for w in recency_weights]
 
-    # Fetch embeddings
     recent_likes = liked_product_ids[:100]
-    result = await pg.fetch_all("""
-        SELECT e.product_id, e.image_embedding::real[] as embedding
+    emb_col = "learned_embedding" if use_learned else "image_embedding"
+    dim = LEARNED_EMBEDDING_DIM if use_learned else EMBEDDING_DIM
+
+    result = await pg.fetch_all(f"""
+        SELECT e.product_id, e.{emb_col}::real[] as embedding
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE e.product_id = ANY($1)
-          AND e.image_embedding IS NOT NULL
+          AND e.{emb_col} IS NOT NULL
           AND pr.is_active = true
     """, [recent_likes])
 
     if not result:
-        return await get_global_average_embedding(pg)
+        return await get_global_average_embedding(pg, use_learned=use_learned)
 
-    # Create mapping of product_id -> embedding
     emb_map = {row['product_id']: np.array(row['embedding'], dtype=np.float32) for row in result}
 
-    # Weighted average (preserving order from liked_product_ids)
-    weighted_sum = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    weighted_sum = np.zeros(dim, dtype=np.float32)
     total_weight = 0.0
 
     for i, pid in enumerate(recent_likes):
@@ -182,7 +183,7 @@ async def get_user_embedding_weighted(
     if total_weight > 0:
         user_embedding = weighted_sum / total_weight
     else:
-        user_embedding = await get_global_average_embedding(pg)
+        user_embedding = await get_global_average_embedding(pg, use_learned=use_learned)
 
     logger.debug(f"Computed weighted user embedding from {len(emb_map)} liked products")
 

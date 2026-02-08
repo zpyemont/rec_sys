@@ -582,3 +582,23 @@ class PostgresClient:
             LIMIT %s
         """
         return self.fetch_val_list(sql, (user_id, limit))
+
+    def get_freshness_timestamps(self, prod_ids: List[str]) -> Dict[str, float]:
+        """
+        Get freshness timestamps for product IDs, returning hours since created_at.
+
+        Returns:
+            Dict mapping product_id to hours since creation (lower = fresher)
+        """
+        if not prod_ids:
+            return {}
+
+        sql = """
+            SELECT
+                p.product_id,
+                EXTRACT(EPOCH FROM (NOW() - COALESCE(p.created_at, p.parsed_at))) / 3600.0 as hours_old
+            FROM catalog.products p
+            WHERE p.product_id = ANY(%s)
+        """
+        rows = self.fetch_all(sql, (prod_ids,))
+        return {row['product_id']: float(row['hours_old']) if row['hours_old'] else 0.0 for row in rows}

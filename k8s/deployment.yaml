@@ -57,6 +57,18 @@ spec:
         # This IP persists across MIG VM replacements
         - name: EMBEDDING_SERVICE_URL
           value: "http://10.154.15.221:8080"
+        # Monolith TF Serving (two-tower model)
+        - name: MONOLITH_HOST
+          value: "monolith-fashion-two-tower-serving.default.svc.cluster.local"
+        - name: MONOLITH_PORT
+          value: "2223"
+        - name: MONOLITH_MODEL_NAME
+          value: "fashion_two_tower"
+        - name: MONOLITH_ENABLED
+          value: "false"
+        # Two-tower learned embeddings (flip to "true" after Step 7)
+        - name: USE_LEARNED_EMBEDDINGS
+          value: "false"
         readinessProbe:
           httpGet:
             path: /healthz

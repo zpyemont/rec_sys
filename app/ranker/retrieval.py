@@ -1,6 +1,10 @@
 """
 Embedding-based candidate retrieval using pgvector (v2 - normalized schema).
 
+Supports two embedding types:
+- CLIP image embeddings (512-dim) - legacy
+- Two-tower learned embeddings (128-dim) - preferred when available
+
 Uses the new schema structure with JOINs across:
 - catalog.products
 - catalog.product_pricing
@@ -27,34 +31,39 @@ async def get_embedding_candidates(
     user_embedding: np.ndarray,
     shown_set: Set[str],
     limit: int = 500,
+    use_learned: bool = False,
 ) -> List[str]:
     """
-    Retrieve candidates using CLIP embedding similarity via pgvector.
+    Retrieve candidates using embedding similarity via pgvector.
 
     Args:
         pg: Async PostgreSQL client (v2)
-        user_embedding: 512-dim user embedding
+        user_embedding: User embedding (128-dim learned or 512-dim CLIP)
         shown_set: Set of product IDs already shown to user
         limit: Maximum number of candidates to return
+        use_learned: If True, search against learned_embedding (128-dim two-tower);
+                     otherwise use image_embedding (512-dim CLIP)
 
     Returns:
         List of product IDs ordered by similarity to user embedding
     """
     shown_list = list(shown_set)[:10000] if shown_set else []
 
-    result = await pg.fetch_val_list("""
+    emb_col = "learned_embedding" if use_learned else "image_embedding"
+
+    result = await pg.fetch_val_list(f"""
         SELECT e.product_id
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE pr.is_active = true
           AND pr.availability NOT IN ('out of stock', 'sold out')
-          AND e.image_embedding IS NOT NULL
+          AND e.{emb_col} IS NOT NULL
           AND ($1::text[] IS NULL OR e.product_id != ALL($1::text[]))
-        ORDER BY e.image_embedding <=> $2::vector
+        ORDER BY e.{emb_col} <=> $2::vector
         LIMIT $3
     """, [shown_list if shown_list else None, user_embedding.tolist(), limit])
 
-    logger.debug(f"Retrieved {len(result)} embedding candidates")
+    logger.debug(f"Retrieved {len(result)} embedding candidates (col={emb_col})")
     return result
 
 
@@ -166,6 +175,7 @@ async def get_candidates_parallel(
     user_embedding: np.ndarray,
     shown_set: Set[str],
     total_limit: int = 500,
+    use_learned: bool = False,
 ) -> List[str]:
     """
     Run all retrievers in parallel and merge results.
@@ -185,7 +195,7 @@ async def get_candidates_parallel(
                 f"trending={trending_limit}, random={random_limit}")
 
     results = await asyncio.gather(
-        get_embedding_candidates(pg, user_embedding, shown_set, embedding_limit),
+        get_embedding_candidates(pg, user_embedding, shown_set, embedding_limit, use_learned=use_learned),
         get_fresh_candidates(redis, pg, fresh_limit),
         get_trending_candidates(redis, pg, trending_limit),
         get_random_candidates(pg, random_limit),

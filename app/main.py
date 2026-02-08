@@ -493,6 +493,19 @@ async def _get_diverse_feed_embedding(
             f"likes={len(liked_product_ids)}, session_positive={len(session_product_ids)}"
         )
 
+        # Check if we should use two-tower learned embeddings
+        use_learned = settings.use_learned_embeddings
+
+        # Try to get user embedding from Monolith user tower (two-tower model)
+        monolith_user_vec = None
+        if use_learned and settings.monolith_enabled and not is_anonymous:
+            try:
+                monolith_client = get_monolith_client(settings)
+                monolith_user_vec = monolith_client.get_user_embedding(user_id)
+                logger.info(f"Got user tower embedding for user={user_id}, shape={monolith_user_vec.shape}")
+            except Exception as e:
+                logger.error(f"Monolith user tower failed: {e}, falling back to averaged embedding")
+
         # STEP 1: Compute user embedding based on cold-start stage
         if is_anonymous:
             # Anonymous user - non-personalized
@@ -510,32 +523,42 @@ async def _get_diverse_feed_embedding(
             # Has session signals but no likes - use session embedding
             logger.info("Cold-start BROWSING: using session signals only")
             session_emb = await get_session_embedding(
-                async_pg, session_product_ids, engagement_scores
+                async_pg, session_product_ids, engagement_scores,
+                use_learned=use_learned,
             )
             if session_emb is not None:
                 candidates = await get_candidates_parallel(
-                    async_pg, async_redis, session_emb, shown_set, total_limit=500
+                    async_pg, async_redis, session_emb, shown_set, total_limit=500,
+                    use_learned=use_learned,
                 )
             else:
                 candidates = await get_candidates_for_anonymous(
                     async_pg, async_redis, total_limit=500
                 )
         else:
-            # Has likes - use blended embedding
-            logger.info(
-                f"Using blended embedding: {len(liked_product_ids)} likes + "
-                f"{len(session_product_ids)} session products"
-            )
-            user_embedding = await get_blended_user_embedding(
-                async_pg,
-                liked_product_ids,
-                session_product_ids,
-                engagement_scores,
-            )
+            # Has likes - use Monolith user tower or blended embedding
+            if monolith_user_vec is not None:
+                # Two-tower: user tower provides the embedding directly
+                logger.info(f"Using Monolith user tower embedding for retrieval")
+                user_embedding = monolith_user_vec
+            else:
+                # Fallback: average of liked product embeddings
+                logger.info(
+                    f"Using blended embedding: {len(liked_product_ids)} likes + "
+                    f"{len(session_product_ids)} session products"
+                )
+                user_embedding = await get_blended_user_embedding(
+                    async_pg,
+                    liked_product_ids,
+                    session_product_ids,
+                    engagement_scores,
+                    use_learned=use_learned,
+                )
 
             # STEP 2: Parallel retrieval (~10ms)
             candidates = await get_candidates_parallel(
-                async_pg, async_redis, user_embedding, shown_set, total_limit=500
+                async_pg, async_redis, user_embedding, shown_set, total_limit=500,
+                use_learned=use_learned,
             )
 
         logger.info(f"Retrieved {len(candidates)} candidates via embedding retrieval")
@@ -557,8 +580,38 @@ async def _get_diverse_feed_embedding(
         else:
             tier = 4
 
-        # STEP 3: Score with Monolith (if enabled) (~50ms)
-        if settings.monolith_enabled and not is_anonymous and candidates_unseen:
+        # STEP 3: Score with Monolith or publish FeatureEvent
+        # When using two-tower learned embeddings, retrieval order IS the ranking
+        # (no separate scoring step needed). Only publish FeatureEvent for training.
+        if use_learned and monolith_user_vec is not None:
+            # Two-tower mode: retrieval order = ranking order
+            # Publish FeatureEvent with user tower embedding for online training
+            if settings.kafka_enabled and not is_anonymous:
+                try:
+                    kafka_producer = get_kafka_producer(settings)
+                    feature_data = {
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "user_embedding": monolith_user_vec.tolist(),
+                        "context": {
+                            "session_position": len(session_product_ids),
+                            "hour_of_day": time.localtime().tm_hour,
+                            "day_of_week": time.localtime().tm_wday,
+                            "device": device or "unknown",
+                            "cold_start_stage": cold_start_stage,
+                        },
+                        "candidates": [
+                            {"product_id": pid, "position": i}
+                            for i, pid in enumerate(candidates_unseen[:20])
+                        ]
+                    }
+                    kafka_producer.publish_feature_event(request_id, event_time, feature_data)
+                    logger.info(f"Published FeatureEvent (two-tower) for request_id={request_id}")
+                except Exception as e:
+                    logger.error(f"Failed to publish FeatureEvent: {e}")
+
+        elif settings.monolith_enabled and not is_anonymous and candidates_unseen:
+            # Legacy mode: separate Monolith scoring step
             try:
                 candidates_to_score = candidates_unseen[:500]
                 monolith_client = get_monolith_client(settings)
@@ -567,7 +620,6 @@ async def _get_diverse_feed_embedding(
                     product_ids=candidates_to_score
                 )
 
-                # Publish FeatureEvent to Kafka (if enabled)
                 if settings.kafka_enabled:
                     try:
                         kafka_producer = get_kafka_producer(settings)
@@ -597,7 +649,6 @@ async def _get_diverse_feed_embedding(
                     except Exception as e:
                         logger.error(f"Failed to publish FeatureEvent: {e}")
 
-                # Sort by Monolith scores
                 ranked_candidates = sorted(
                     [(pid, scores.get(pid, 0)) for pid in candidates_to_score],
                     key=lambda x: x[1],
@@ -608,7 +659,6 @@ async def _get_diverse_feed_embedding(
 
             except Exception as e:
                 logger.error(f"Monolith prediction failed: {e}")
-                # Fall through with embedding-ordered candidates
 
         # STEP 4: Fetch metadata and apply brand diversity (~5ms)
         # Take extra candidates for diversity filtering
@@ -780,7 +830,7 @@ def _get_diverse_feed_legacy(
     # Fresh items exploration bucket
     recent_pool = query_recent_ids(pg_client, hours=24, limit=1000)
     recent_unseen = [pid for pid in recent_pool if pid not in shown_set]
-    freshness_metrics = fetch_freshness_metrics(recent_unseen)
+    freshness_metrics = fetch_freshness_metrics(recent_unseen, pg=pg_client)
     fresh_features = fetch_features_for_ids(list(freshness_metrics.keys()))
     fresh_model_scores = score_with_model_or_fallback(fresh_features, fallback_scores=freshness_metrics)
     fresh_div_sorted = sorted(fresh_model_scores.items(), key=lambda x: x[1], reverse=True)
