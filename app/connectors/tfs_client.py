@@ -95,17 +95,49 @@ class MonolithClient:
             logger.error(f"Monolith prediction failed: {e.code()} - {e.details()}")
             raise
 
-    def _hash_id(self, id_str: str) -> int:
+    def get_user_embedding(self, user_id: str) -> np.ndarray:
         """
-        Hash string ID to int64
+        Call user tower to get 128-dim user embedding.
 
         Args:
-            id_str: String identifier
+            user_id: User identifier
 
         Returns:
-            int64 hash value (positive)
+            128-dim numpy array (L2-normalized)
+
+        Raises:
+            grpc.RpcError: If prediction call fails
         """
-        return hash(id_str) % (2**63)
+        user_id_hash = self._hash_id(user_id)
+
+        example = tf.train.Example()
+        example.features.feature['user_id'].int64_list.value.append(user_id_hash)
+
+        request = predict_pb2.PredictRequest()
+        request.model_spec.name = self.model_name
+        request.model_spec.signature_name = 'user_tower'
+
+        request.inputs['examples'].CopyFrom(
+            tf.make_tensor_proto([example.SerializeToString()], dtype=tf.string))
+
+        try:
+            result = self.stub.Predict(request, timeout=self.timeout)
+            user_vec = tf.make_ndarray(result.outputs['user_vec'])
+            logger.debug(f"User tower prediction successful for user={user_id}")
+            return user_vec[0]  # Shape: (128,)
+        except grpc.RpcError as e:
+            logger.error(f"User tower prediction failed: {e.code()} - {e.details()}")
+            raise
+
+    def _hash_id(self, id_str: str) -> int:
+        """
+        Hash string ID to int64 using FarmHash.
+
+        Must match Monolith training which uses tf.strings.to_hash_bucket_fast
+        (FarmHash-based). Python's hash() is non-deterministic across processes.
+        """
+        import farmhash
+        return farmhash.fingerprint64(id_str) % (2**63 - 1)
 
     def _extract_user_embedding(self, result) -> np.ndarray:
         """
