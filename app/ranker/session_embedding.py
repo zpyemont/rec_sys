@@ -205,7 +205,28 @@ def determine_cold_start_stage(
         return STAGE_EMERGING
     elif liked_count >= 1:
         return STAGE_FIRST_LIKE
-    elif session_positive_count >= 3:
+    elif session_positive_count >= 1:  # Was 3 — act on first signal
         return STAGE_BROWSING
     else:
         return STAGE_BRAND_NEW
+
+
+# Epsilon values by cold-start stage (explore budget fraction)
+_EPSILON_MAP = {
+    STAGE_BRAND_NEW: 0.4,    # Heavy exploration for new users
+    STAGE_BROWSING: 0.2,     # Moderate exploration (has some session signals)
+    STAGE_FIRST_LIKE: 0.15,  # Slightly less explore
+    STAGE_EMERGING: 0.10,    # Growing personalization
+    STAGE_ESTABLISHED: 0.08, # Low explore, mostly exploit
+}
+
+
+def get_explore_epsilon(cold_start_stage: str, is_anonymous: bool = False) -> float:
+    """
+    Get explore budget fraction based on user's cold-start stage.
+
+    Returns epsilon in [0, 1] — the fraction of the feed reserved for exploration.
+    """
+    if is_anonymous:
+        return 0.4
+    return _EPSILON_MAP.get(cold_start_stage, 0.15)

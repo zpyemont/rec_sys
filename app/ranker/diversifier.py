@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 from collections import deque
 
+import numpy as np
+
 
 def filter_seen_pairs(bucket_list: List[Tuple[str, float]], shown_set: set[str]) -> List[Tuple[str, float]]:
     return [(pid, score) for pid, score in bucket_list if pid not in shown_set]
@@ -166,3 +168,82 @@ def enforce_brand_diversity(
     result.extend(deferred)
 
     return result
+
+
+def mmr_rerank(
+    candidates: List[str],
+    embeddings: Dict[str, "np.ndarray"],
+    relevance_scores: Dict[str, float],
+    k: int = 50,
+    lambda_param: float = 0.7,
+) -> List[str]:
+    """
+    Maximal Marginal Relevance re-ranking for diversity.
+
+    score(i) = lambda * relevance(i) - (1 - lambda) * max_sim(i, selected)
+
+    Args:
+        candidates: Product IDs to re-rank
+        embeddings: Dict of product_id -> embedding vector
+        relevance_scores: Dict of product_id -> relevance score (0-1)
+        k: Number of items to select
+        lambda_param: Trade-off between relevance (1.0) and diversity (0.0)
+
+    Returns:
+        Re-ranked list of k product IDs
+    """
+    if not candidates:
+        return []
+
+    # Split into candidates with and without embeddings
+    with_emb = [pid for pid in candidates if pid in embeddings]
+    without_emb = [pid for pid in candidates if pid not in embeddings]
+
+    if not with_emb:
+        return sorted(candidates, key=lambda p: relevance_scores.get(p, 0), reverse=True)[:k]
+
+    # Build embedding matrix for fast similarity computation
+    emb_matrix = np.stack([embeddings[pid] for pid in with_emb])
+    # L2 normalize for cosine similarity
+    norms = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+    norms = np.where(norms > 0, norms, 1.0)
+    emb_matrix = emb_matrix / norms
+
+    pid_to_idx = {pid: i for i, pid in enumerate(with_emb)}
+
+    selected: List[str] = []
+    selected_set: set[str] = set()
+
+    for _ in range(min(k, len(with_emb))):
+        best_score = -float("inf")
+        best_pid = None
+
+        for pid in with_emb:
+            if pid in selected_set:
+                continue
+            idx = pid_to_idx[pid]
+            rel = relevance_scores.get(pid, 0.0)
+
+            if not selected:
+                mmr_score = rel
+            else:
+                selected_indices = [pid_to_idx[s] for s in selected]
+                sims = emb_matrix[idx] @ emb_matrix[selected_indices].T
+                max_sim = float(np.max(sims))
+                mmr_score = lambda_param * rel - (1 - lambda_param) * max_sim
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_pid = pid
+
+        if best_pid is None:
+            break
+
+        selected.append(best_pid)
+        selected_set.add(best_pid)
+
+    # Append items without embeddings at end (sorted by relevance)
+    without_emb_sorted = sorted(without_emb, key=lambda p: relevance_scores.get(p, 0), reverse=True)
+    selected.extend(without_emb_sorted)
+
+    return selected[:k]

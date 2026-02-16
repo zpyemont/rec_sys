@@ -90,11 +90,13 @@ async def get_fresh_candidates(
     redis: "AsyncRedisClient",
     pg: "AsyncPostgresClient",
     limit: int = 150,
+    max_per_brand: int = 5,
 ) -> List[str]:
     """
-    Get fresh products (cached in Redis, refreshed every 5 min).
+    Get fresh products with brand diversity (cached in Redis, refreshed every 5 min).
+    Uses ROW_NUMBER PARTITION BY brand to cap each brand at max_per_brand items.
     """
-    cache_key = "candidates:fresh:v2"
+    cache_key = "candidates:fresh:v3"
 
     cached = await redis.get(cache_key)
     if cached:
@@ -103,18 +105,23 @@ async def get_fresh_candidates(
 
     logger.debug("Fresh candidates cache miss, querying PostgreSQL")
 
-    avail_clause, avail_params, _ = _availability_filter(2)
+    avail_clause, avail_params, _ = _availability_filter(3)
 
     fresh = await pg.fetch_val_list(f"""
-        SELECT p.product_id
-        FROM catalog.products p
-        JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
-        WHERE pr.is_active = true
-          {avail_clause}
-          AND p.parsed_at >= NOW() - INTERVAL '7 days'
-        ORDER BY p.parsed_at DESC
-        LIMIT $1
-    """, [limit * 2] + avail_params)
+        WITH ranked AS (
+            SELECT p.product_id,
+                   ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY p.parsed_at DESC) AS rn
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE pr.is_active = true
+              {avail_clause}
+              AND p.parsed_at >= NOW() - INTERVAL '7 days'
+        )
+        SELECT product_id FROM ranked
+        WHERE rn <= $1
+        ORDER BY rn, RANDOM()
+        LIMIT $2
+    """, [max_per_brand, limit * 2] + avail_params)
 
     if fresh:
         await redis.setex(cache_key, 300, fresh)
@@ -126,11 +133,13 @@ async def get_trending_candidates(
     redis: "AsyncRedisClient",
     pg: "AsyncPostgresClient",
     limit: int = 100,
+    max_per_brand: int = 5,
 ) -> List[str]:
     """
-    Get trending products (cached in Redis, refreshed every 5 min).
+    Get trending products with brand diversity (cached in Redis, refreshed every 5 min).
+    Uses ROW_NUMBER PARTITION BY brand to cap each brand.
     """
-    cache_key = "candidates:trending:v2"
+    cache_key = "candidates:trending:v3"
 
     cached = await redis.get(cache_key)
     if cached:
@@ -139,19 +148,24 @@ async def get_trending_candidates(
 
     logger.debug("Trending candidates cache miss, querying PostgreSQL")
 
-    avail_clause, avail_params, _ = _availability_filter(2)
+    avail_clause, avail_params, _ = _availability_filter(3)
 
     trending = await pg.fetch_val_list(f"""
-        SELECT p.product_id
-        FROM catalog.products p
-        JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
-        WHERE pr.is_active = true
-          {avail_clause}
-          AND pr.like_count >= 0
-          AND p.parsed_at >= NOW() - INTERVAL '7 days'
-        ORDER BY pr.like_count DESC, p.parsed_at DESC
-        LIMIT $1
-    """, [limit * 2] + avail_params)
+        WITH ranked AS (
+            SELECT p.product_id,
+                   ROW_NUMBER() OVER (PARTITION BY p.brand ORDER BY pr.like_count DESC, p.parsed_at DESC) AS rn
+            FROM catalog.products p
+            JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
+            WHERE pr.is_active = true
+              {avail_clause}
+              AND pr.like_count >= 0
+              AND p.parsed_at >= NOW() - INTERVAL '7 days'
+        )
+        SELECT product_id FROM ranked
+        WHERE rn <= $1
+        ORDER BY rn, RANDOM()
+        LIMIT $2
+    """, [max_per_brand, limit * 2] + avail_params)
 
     if trending:
         await redis.setex(cache_key, 300, trending)
@@ -284,3 +298,64 @@ async def get_candidates_for_anonymous(
             merged.append(pid)
 
     return merged[:total_limit]
+
+
+async def get_candidates_explore_exploit(
+    pg: "AsyncPostgresClient",
+    redis: "AsyncRedisClient",
+    exploit_candidates: List[str],
+    epsilon: float = 0.2,
+    total_limit: int = 500,
+) -> List[str]:
+    """
+    Merge exploit (personalized) candidates with explore (diverse discovery) candidates.
+
+    Explore candidates are brand-diverse trending items that add variety to the feed.
+    The epsilon parameter controls what fraction of the feed is exploration.
+
+    Args:
+        pg: Async PostgreSQL client
+        redis: Async Redis client
+        exploit_candidates: Personalized/ranked candidate IDs
+        epsilon: Fraction of feed for exploration (0.0 = all exploit, 1.0 = all explore)
+        total_limit: Total candidates to return
+
+    Returns:
+        Merged candidate list with explore items interleaved
+    """
+    explore_count = int(total_limit * epsilon)
+    exploit_count = total_limit - explore_count
+
+    # Get explore candidates: brand-diverse trending across all categories
+    explore_candidates = await get_trending_candidates(redis, pg, limit=explore_count * 2)
+
+    # Remove any overlap with exploit set
+    exploit_set = set(exploit_candidates)
+    explore_candidates = [pid for pid in explore_candidates if pid not in exploit_set][:explore_count]
+
+    # Interleave: every 1/epsilon items, insert an explore item
+    exploit_pool = exploit_candidates[:exploit_count]
+    merged: List[str] = []
+    explore_idx = 0
+    step = max(1, int(1.0 / epsilon)) if epsilon > 0 else total_limit + 1
+
+    for i, pid in enumerate(exploit_pool):
+        merged.append(pid)
+        if (i + 1) % step == 0 and explore_idx < len(explore_candidates):
+            merged.append(explore_candidates[explore_idx])
+            explore_idx += 1
+
+    # Append remaining explore items
+    while explore_idx < len(explore_candidates):
+        merged.append(explore_candidates[explore_idx])
+        explore_idx += 1
+
+    # Deduplicate while preserving order
+    seen: Set[str] = set()
+    result: List[str] = []
+    for pid in merged:
+        if pid not in seen:
+            seen.add(pid)
+            result.append(pid)
+
+    return result[:total_limit]

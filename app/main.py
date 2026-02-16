@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 import time
 import logging
+import numpy as np
 
 from .settings import get_settings
 from .schemas import (
@@ -43,11 +44,12 @@ from .ranker.diversifier import (
     interleave_buckets,
     filter_seen_pairs,
     enforce_brand_diversity,
+    mmr_rerank,
 )
 from .ranker.model import score_with_model_or_fallback
 
 # New embedding-based retrieval
-from .ranker.retrieval import get_candidates_parallel, get_candidates_for_anonymous
+from .ranker.retrieval import get_candidates_parallel, get_candidates_for_anonymous, get_candidates_explore_exploit
 
 # Session-aware features
 from .connectors.session_store import (
@@ -59,6 +61,7 @@ from .ranker.session_embedding import (
     get_blended_user_embedding,
     get_session_embedding,
     determine_cold_start_stage,
+    get_explore_epsilon,
     STAGE_BRAND_NEW,
     STAGE_BROWSING,
 )
@@ -478,7 +481,7 @@ async def _get_diverse_feed_embedding(
         engagement_scores = {}
         if session_id and not is_anonymous:
             session_product_ids = get_session_positive_products(
-                user_id, session_id, min_score=0.3, limit=30
+                user_id, session_id, min_score=0.1, limit=30
             )
             engagement_scores = get_session_engagement_map(user_id, session_id)
 
@@ -660,16 +663,58 @@ async def _get_diverse_feed_embedding(
             except Exception as e:
                 logger.error(f"Monolith prediction failed: {e}")
 
-        # STEP 4: Fetch metadata and apply brand diversity (~5ms)
-        # Take extra candidates for diversity filtering
+        # STEP 3.5: Apply explore/exploit budget
+        epsilon = get_explore_epsilon(cold_start_stage, is_anonymous=is_anonymous)
+        logger.info(f"Explore/exploit: epsilon={epsilon:.2f}, stage={cold_start_stage}")
+
+        if not is_anonymous and cold_start_stage not in (STAGE_BRAND_NEW,):
+            candidates_unseen = await get_candidates_explore_exploit(
+                async_pg, async_redis,
+                exploit_candidates=candidates_unseen,
+                epsilon=epsilon,
+                total_limit=len(candidates_unseen),
+            )
+
+        # STEP 4: Fetch metadata + MMR re-ranking + brand diversity
         candidates_for_diversity = candidates_unseen[:final_feed_size * 3]
         product_metadata = await async_pg.get_product_metadata_for_ids(candidates_for_diversity)
 
-        # Build brand map for diversity enforcement
-        brand_map = {pid: meta.get("brand") for pid, meta in product_metadata.items()}
+        # Build relevance scores for MMR (position-based decay)
+        relevance_scores = {
+            pid: 1.0 / (1.0 + i * 0.02)
+            for i, pid in enumerate(candidates_for_diversity)
+        }
 
-        # Apply brand diversity (max 2-3 items per brand in final feed)
-        final_ids = enforce_brand_diversity(candidates_for_diversity, brand_map, max_per_window=3)
+        # Fetch embeddings for MMR diversity
+        use_learned = settings.use_learned_embeddings
+        emb_col = "learned_embedding" if use_learned else "image_embedding"
+        emb_rows = await async_pg.fetch_all(f"""
+            SELECT e.product_id, e.{emb_col}::real[] as embedding
+            FROM embeddings.product_vectors e
+            WHERE e.product_id = ANY($1)
+              AND e.{emb_col} IS NOT NULL
+        """, [candidates_for_diversity])
+
+        emb_map = {
+            row["product_id"]: np.array(row["embedding"], dtype=np.float32)
+            for row in emb_rows
+        }
+
+        # Apply MMR re-ranking for diversity
+        if emb_map:
+            final_ids = mmr_rerank(
+                candidates_for_diversity,
+                emb_map,
+                relevance_scores,
+                k=final_feed_size,
+                lambda_param=0.7,
+            )
+        else:
+            final_ids = candidates_for_diversity[:final_feed_size]
+
+        # Apply brand diversity on top of MMR result
+        brand_map = {pid: meta.get("brand") for pid, meta in product_metadata.items()}
+        final_ids = enforce_brand_diversity(final_ids, brand_map, max_per_window=3)
         final_ids = final_ids[:final_feed_size]
 
         # Record shown (skip for anonymous users)
