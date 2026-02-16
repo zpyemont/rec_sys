@@ -19,11 +19,28 @@ from typing import List, Set, TYPE_CHECKING
 
 import numpy as np
 
+from ..settings import Settings
+
 if TYPE_CHECKING:
     from ..connectors.postgres import AsyncPostgresClient
     from ..connectors.redis_client import AsyncRedisClient
 
 logger = logging.getLogger(__name__)
+
+
+def _availability_filter(param_idx: int) -> tuple[str, list, int]:
+    """Build stock availability filter clause for asyncpg queries.
+
+    Returns (sql_fragment, params, next_param_idx).
+    Uses settings.excluded_availability_values with case-insensitive matching.
+    Products with NULL availability are included (not filtered out).
+    """
+    s = Settings()
+    if not s.filter_out_of_stock or not s.excluded_availability_values:
+        return "", [], param_idx
+    excluded = [v.lower() for v in s.excluded_availability_values]
+    clause = f"AND (pr.availability IS NULL OR LOWER(pr.availability) != ALL(${param_idx}::text[]))"
+    return clause, [excluded], param_idx + 1
 
 
 async def get_embedding_candidates(
@@ -51,17 +68,19 @@ async def get_embedding_candidates(
 
     emb_col = "learned_embedding" if use_learned else "image_embedding"
 
+    avail_clause, avail_params, _ = _availability_filter(4)
+
     result = await pg.fetch_val_list(f"""
         SELECT e.product_id
         FROM embeddings.product_vectors e
         JOIN catalog.product_pricing pr ON e.product_id = pr.product_id
         WHERE pr.is_active = true
-          AND pr.availability NOT IN ('out of stock', 'sold out')
+          {avail_clause}
           AND e.{emb_col} IS NOT NULL
           AND ($1::text[] IS NULL OR e.product_id != ALL($1::text[]))
         ORDER BY e.{emb_col} <=> $2::vector
         LIMIT $3
-    """, [shown_list if shown_list else None, user_embedding.tolist(), limit])
+    """, [shown_list if shown_list else None, user_embedding.tolist(), limit] + avail_params)
 
     logger.debug(f"Retrieved {len(result)} embedding candidates (col={emb_col})")
     return result
@@ -84,16 +103,18 @@ async def get_fresh_candidates(
 
     logger.debug("Fresh candidates cache miss, querying PostgreSQL")
 
-    fresh = await pg.fetch_val_list("""
+    avail_clause, avail_params, _ = _availability_filter(2)
+
+    fresh = await pg.fetch_val_list(f"""
         SELECT p.product_id
         FROM catalog.products p
         JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
         WHERE pr.is_active = true
-          AND pr.availability NOT IN ('out of stock', 'sold out')
+          {avail_clause}
           AND p.parsed_at >= NOW() - INTERVAL '7 days'
         ORDER BY p.parsed_at DESC
         LIMIT $1
-    """, [limit * 2])
+    """, [limit * 2] + avail_params)
 
     if fresh:
         await redis.setex(cache_key, 300, fresh)
@@ -118,17 +139,19 @@ async def get_trending_candidates(
 
     logger.debug("Trending candidates cache miss, querying PostgreSQL")
 
-    trending = await pg.fetch_val_list("""
+    avail_clause, avail_params, _ = _availability_filter(2)
+
+    trending = await pg.fetch_val_list(f"""
         SELECT p.product_id
         FROM catalog.products p
         JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
         WHERE pr.is_active = true
-          AND pr.availability NOT IN ('out of stock', 'sold out')
+          {avail_clause}
           AND pr.like_count >= 0
           AND p.parsed_at >= NOW() - INTERVAL '7 days'
         ORDER BY pr.like_count DESC, p.parsed_at DESC
         LIMIT $1
-    """, [limit * 2])
+    """, [limit * 2] + avail_params)
 
     if trending:
         await redis.setex(cache_key, 300, trending)
@@ -143,27 +166,29 @@ async def get_random_candidates(
     """
     Get random high-quality products for exploration.
     """
-    result = await pg.fetch_val_list("""
+    avail_clause, avail_params, _ = _availability_filter(2)
+
+    result = await pg.fetch_val_list(f"""
         SELECT p.product_id
         FROM catalog.products p
         TABLESAMPLE BERNOULLI(1)
         JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
         WHERE pr.is_active = true
-          AND pr.availability NOT IN ('out of stock', 'sold out')
+          {avail_clause}
         LIMIT $1
-    """, [limit])
+    """, [limit] + avail_params)
 
     if len(result) < limit // 2:
         logger.debug("TABLESAMPLE returned few results, using fallback")
-        result = await pg.fetch_val_list("""
+        result = await pg.fetch_val_list(f"""
             SELECT p.product_id
             FROM catalog.products p
             JOIN catalog.product_pricing pr ON p.product_id = pr.product_id
             WHERE pr.is_active = true
-              AND pr.availability NOT IN ('out of stock', 'sold out')
+              {avail_clause}
             ORDER BY RANDOM()
             LIMIT $1
-        """, [limit])
+        """, [limit] + avail_params)
 
     logger.debug(f"Retrieved {len(result)} random candidates")
     return result

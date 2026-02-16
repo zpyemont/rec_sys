@@ -4,8 +4,8 @@ options:
 substitutions:
   _REGION: europe-west1
   _AR_REPO: containers
-  _GKE_CLUSTER: rec-sys-cluster
-  _GKE_LOCATION: europe-west1
+  _GKE_CLUSTER: rec-sys-standard
+  _GKE_LOCATION: europe-west1-b
   _CLOUD_SQL_INSTANCE: "looksyuk:europe-west1:looksy-catalog-prod"
 
 steps:

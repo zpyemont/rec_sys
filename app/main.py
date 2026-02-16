@@ -915,7 +915,7 @@ async def search(
 
     Modes:
     - hybrid: Combines all three search methods using RRF fusion (default)
-    - semantic: Text embedding similarity search (768-dim Marqo embeddings)
+    - semantic: Text embedding similarity search (1024-dim Marqo embeddings)
     - visual: Cross-modal text-to-image search (512-dim CLIP embeddings)
     - keyword: PostgreSQL full-text search (tsvector/BM25-style ranking)
 

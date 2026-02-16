@@ -99,5 +99,5 @@ class EmbedRequest(BaseModel):
 
 class EmbedResponse(BaseModel):
     """Response with generated embeddings."""
-    text_embedding: Optional[List[float]] = None   # 768-dim Marqo
+    text_embedding: Optional[List[float]] = None   # 1024-dim Marqo
     image_embedding: Optional[List[float]] = None  # 512-dim CLIP
