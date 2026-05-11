@@ -12,7 +12,18 @@ class OutfitBrief(BaseModel):
     notes: str
 
 
+class ProductHit(BaseModel):
+    """Compact search result — enough for the agent to decide what to inspect.
+    Full details (images, description, palette) available via inspect_product."""
+    product_id: str
+    title: str
+    price_gbp: float
+    slot: str
+    subcategory: str
+
+
 class ProductSummary(BaseModel):
+    """Full summary — used in API responses, not in agent context."""
     product_id: str
     title: str
     price_gbp: float

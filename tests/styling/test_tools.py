@@ -6,7 +6,7 @@ from app.styling.tools import (
     check_compatibility, finalise, render_outfit_preview,
     _palette_overlap_score, _style_compatibility_score, _price_coherence_score,
 )
-from app.styling.schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit, RenderedPreview
+from app.styling.schemas import OutfitBrief, ProductHit, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit, RenderedPreview
 
 
 def test_anthropic_client_importable():
@@ -88,7 +88,7 @@ class TestSearchProducts:
             embedding_service=mock_embedding_service,
         )
         assert len(results) == 1
-        assert isinstance(results[0], ProductSummary)
+        assert isinstance(results[0], ProductHit)
         assert results[0].slot == "dress"
         assert results[0].product_id == "domain:handle-1"
 
@@ -301,6 +301,7 @@ class TestSearchProductsWithReferenceImage:
             embedding_service=svc,
         )
         assert len(results) == 1
+        assert isinstance(results[0], ProductHit)
         assert mock_pg_with_embeddings.fetch_all.call_count == 2
 
     @pytest.mark.asyncio

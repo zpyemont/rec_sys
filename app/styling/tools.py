@@ -9,7 +9,7 @@ import statistics
 import uuid
 from typing import TYPE_CHECKING
 
-from .schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit, RenderedPreview
+from .schemas import OutfitBrief, ProductHit, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit, RenderedPreview
 from .anthropic_client import CHEAP_MODEL
 from .slot_mapper import SLOT_MAP, VALID_SLOTS, subcategory_to_slot
 from .palette import extract_colours, colour_overlap
@@ -63,7 +63,7 @@ async def search_products(
     *,
     pg: "AsyncPostgresClient",
     embedding_service: "EmbeddingService",
-) -> list[ProductSummary]:
+) -> list[ProductHit]:
     """ANN search over product index, filtered to slot and optionally price.
 
     When reference_product_ids is provided, their stored CLIP image embeddings
@@ -148,13 +148,10 @@ async def search_products(
                 "Product %s has currency %s, treating as GBP",
                 row["product_id"], row["currency"],
             )
-        results.append(ProductSummary(
+        results.append(ProductHit(
             product_id=row["product_id"],
             title=row["title"] or "",
             price_gbp=float(row["price"] or 0),
-            image_url=row.get("image_url") or "",
-            description=row.get("description") or "",
-            colour_tags=extract_colours(f"{row.get('title', '')} {row.get('description', '')}"),
             slot=slot,
             subcategory=row.get("subcategory") or slot,
         ))
