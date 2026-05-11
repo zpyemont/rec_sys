@@ -11,6 +11,7 @@ from .schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityRe
 from .anthropic_client import CHEAP_MODEL
 from .slot_mapper import SLOT_MAP, VALID_SLOTS, subcategory_to_slot
 from .palette import extract_colours, colour_overlap
+from .image_utils import fetch_and_resize
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
@@ -150,6 +151,14 @@ async def inspect_product(product_id: str, *, pg: "AsyncPostgresClient") -> Prod
     palette = extract_colours(f"{row.get('title', '')} {description}")
     slot = subcategory_to_slot(row.get("subcategory") or "") or "accessory"
 
+    image_bytes = None
+    image_available = False
+    if image_urls:
+        image_bytes = await fetch_and_resize(image_urls[0])
+        image_available = image_bytes is not None
+        if not image_available:
+            logger.warning("Could not fetch image for product %s", product_id)
+
     return ProductDetail(
         product_id=row["product_id"],
         title=row["title"] or "",
@@ -162,6 +171,8 @@ async def inspect_product(product_id: str, *, pg: "AsyncPostgresClient") -> Prod
         affiliate_url=row.get("url") or "",
         slot=slot,
         subcategory=row.get("subcategory") or "",
+        image_bytes=image_bytes,
+        image_available=image_available,
     )
 
 

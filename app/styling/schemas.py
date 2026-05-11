@@ -35,6 +35,8 @@ class ProductDetail(BaseModel):
     affiliate_url: str
     slot: str
     subcategory: str
+    image_bytes: bytes | None = None
+    image_available: bool = True
 
 
 class CompatibilityReport(BaseModel):

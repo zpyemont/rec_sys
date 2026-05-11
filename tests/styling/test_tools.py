@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.styling.tools import (
     generate_brief, search_products, inspect_product,
@@ -160,6 +160,40 @@ class TestInspectProduct:
     async def test_palette_extracted_from_description(self, mock_pg_with_product):
         result = await inspect_product("domain:handle-1", pg=mock_pg_with_product)
         assert "champagne" in result.palette
+
+
+class TestInspectProductWithImage:
+    @pytest.fixture
+    def mock_pg_with_product(self):
+        pg = MagicMock()
+        pg.fetch_one = AsyncMock(return_value={
+            "product_id": "domain:handle-1",
+            "title": "Champagne Slip Dress",
+            "price": 89.0,
+            "currency": "GBP",
+            "description": "Satin slip dress in champagne",
+            "subcategory": "Dresses",
+            "url": "https://example.com/product",
+        })
+        pg.fetch_all = AsyncMock(return_value=[
+            {"image_url": "https://example.com/img1.jpg"},
+        ])
+        return pg
+
+    @pytest.mark.asyncio
+    async def test_returns_image_bytes_when_available(self, mock_pg_with_product):
+        fake_img = b"\xff\xd8\xff" + b"\x00" * 100
+        with patch("app.styling.tools.fetch_and_resize", new=AsyncMock(return_value=fake_img)):
+            result = await inspect_product("domain:handle-1", pg=mock_pg_with_product)
+        assert result.image_bytes is not None
+        assert result.image_available is True
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_text_when_fetch_fails(self, mock_pg_with_product):
+        with patch("app.styling.tools.fetch_and_resize", new=AsyncMock(return_value=None)):
+            result = await inspect_product("domain:handle-1", pg=mock_pg_with_product)
+        assert result.image_bytes is None
+        assert result.image_available is False
 
 
 class TestCompatibilityScores:
