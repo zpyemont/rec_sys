@@ -267,6 +267,61 @@ class TestCheckCompatibility:
             await check_compatibility(["p1"], pg=pg, anthropic_client=mock_anthropic_compat)
 
 
+class TestSearchProductsWithReferenceImage:
+    @pytest.fixture
+    def mock_pg_with_embeddings(self):
+        pg = MagicMock()
+        pg.fetch_all = AsyncMock(side_effect=[
+            # First call: fetch reference product embeddings
+            [{"image_embedding": [0.5] * 512}],
+            # Second call: search results
+            [{
+                "product_id": "p2",
+                "title": "Black Heeled Sandals",
+                "price": 85.0,
+                "currency": "GBP",
+                "image_url": "https://example.com/shoes.jpg",
+                "description": "black strappy sandals",
+                "subcategory": "Heeled Sandals",
+                "url": "https://example.com/product2",
+            }],
+        ])
+        return pg
+
+    @pytest.mark.asyncio
+    async def test_fetches_reference_embeddings(self, mock_pg_with_embeddings):
+        svc = MagicMock()
+        svc.get_embeddings = AsyncMock(return_value=([0.1] * 1024, [0.3] * 512))
+
+        results = await search_products(
+            "shoes",
+            "heeled sandals to match the dress",
+            reference_product_ids=["hero-dress-id"],
+            pg=mock_pg_with_embeddings,
+            embedding_service=svc,
+        )
+        assert len(results) == 1
+        assert mock_pg_with_embeddings.fetch_all.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_text_only_when_no_reference_embeddings(self):
+        pg = MagicMock()
+        pg.fetch_all = AsyncMock(side_effect=[
+            [],  # No embeddings found for reference
+            [{"product_id": "p1", "title": "Shoes", "price": 50.0, "currency": "GBP",
+              "image_url": "https://example.com/s.jpg", "description": "shoes",
+              "subcategory": "Heeled Sandals", "url": "https://example.com/p1"}],
+        ])
+        svc = MagicMock()
+        svc.get_embeddings = AsyncMock(return_value=([0.1] * 1024, [0.3] * 512))
+        results = await search_products(
+            "shoes", "heeled sandals",
+            reference_product_ids=["missing-id"],
+            pg=pg, embedding_service=svc,
+        )
+        assert len(results) == 1
+
+
 class TestFinalise:
     def test_returns_none(self):
         assert finalise([]) is None

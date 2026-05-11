@@ -54,13 +54,21 @@ async def generate_brief(prompt: str, *, anthropic_client: "AsyncAnthropic") -> 
 async def search_products(
     slot: str,
     description: str,
+    reference_product_ids: list[str] | None = None,
     max_price_gbp: float | None = None,
     k: int = 10,
     *,
     pg: "AsyncPostgresClient",
     embedding_service: "EmbeddingService",
 ) -> list[ProductSummary]:
-    """ANN search over product index, filtered to slot and optionally price."""
+    """ANN search over product index, filtered to slot and optionally price.
+
+    When reference_product_ids is provided, their stored CLIP image embeddings
+    are averaged with the query's CLIP text embedding (both 512-dim, same aligned
+    space) to anchor the search visually on a committed hero piece.
+    """
+    import numpy as np
+
     if slot not in VALID_SLOTS:
         raise ValueError(f"Unknown slot '{slot}'. Valid: {VALID_SLOTS}")
 
@@ -70,8 +78,32 @@ async def search_products(
     if text_emb is None and image_emb is None:
         raise RuntimeError("Embedding service returned no embeddings")
 
-    embedding = text_emb if text_emb is not None else image_emb
-    emb_col = "text_embedding" if text_emb is not None else "image_embedding"
+    # CLIP text and image embeddings share the same 512-dim aligned space —
+    # averaging is valid (Option 1 from spec).
+    clip_emb = image_emb  # 512-dim CLIP text-to-image embedding
+
+    if reference_product_ids and clip_emb is not None:
+        ref_rows = await pg.fetch_all(
+            "SELECT image_embedding FROM embeddings.product_vectors "
+            "WHERE product_id = ANY($1::text[]) AND image_embedding IS NOT NULL",
+            [reference_product_ids],
+        )
+        if ref_rows:
+            ref_vecs = [row["image_embedding"] for row in ref_rows]
+            all_vecs = np.array([clip_emb] + ref_vecs, dtype=float)
+            averaged = all_vecs.mean(axis=0)
+            norm = np.linalg.norm(averaged)
+            clip_emb = (averaged / norm).tolist() if norm > 0 else clip_emb
+
+    # When using reference images, search CLIP image space; otherwise use
+    # the higher-quality Marqo text embedding for semantic matching.
+    if reference_product_ids and clip_emb is not None:
+        embedding = clip_emb
+        emb_col = "image_embedding"
+    else:
+        embedding = text_emb if text_emb is not None else image_emb
+        emb_col = "text_embedding" if text_emb is not None else "image_embedding"
+
     emb_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
     price_clause = "AND pp.price <= $4" if max_price_gbp is not None else ""
