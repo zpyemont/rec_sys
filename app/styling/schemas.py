@@ -46,6 +46,7 @@ class CompatibilityReport(BaseModel):
     price_coherence: float
     rationale: str
     compatible: bool
+    preview_image_url: str | None = None
 
 
 class OutfitItem(BaseModel):
@@ -97,3 +98,10 @@ class SwapRequest(BaseModel):
 class SwapResponse(BaseModel):
     new_item: OutfitItem
     total_price_gbp: float
+
+
+class RenderedPreview(BaseModel):
+    image_bytes: bytes
+    image_url: str
+    layout_notes: str
+    partial: bool = False

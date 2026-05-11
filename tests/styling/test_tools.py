@@ -3,10 +3,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.styling.tools import (
     generate_brief, search_products, inspect_product,
-    check_compatibility, finalise,
+    check_compatibility, finalise, render_outfit_preview,
     _palette_overlap_score, _style_compatibility_score, _price_coherence_score,
 )
-from app.styling.schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit
+from app.styling.schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit, RenderedPreview
 
 
 def test_anthropic_client_importable():
@@ -329,3 +329,153 @@ class TestFinalise:
     def test_accepts_candidate_outfits(self):
         outfit = CandidateOutfit(outfit_id="o1", items=[], rationale="test", total_price_gbp=0.0)
         assert finalise([outfit]) is None
+
+
+_GCS_URL = "https://storage.googleapis.com/looksy-outfit-composites/styling/composites/abc.png"
+
+
+class TestRenderOutfitPreview:
+    @pytest.fixture
+    def mock_pg_images(self):
+        pg = MagicMock()
+        pg.fetch_all = AsyncMock(side_effect=[
+            # image URL query
+            [
+                {"product_id": "p1", "image_url": "https://example.com/img1.jpg"},
+                {"product_id": "p2", "image_url": "https://example.com/img2.jpg"},
+            ],
+            # subcategory query
+            [
+                {"product_id": "p1", "subcategory": "Dresses"},
+                {"product_id": "p2", "subcategory": "Heeled Sandals"},
+            ],
+        ])
+        return pg
+
+    @pytest.fixture
+    def mock_gcs(self):
+        gcs = MagicMock()
+        gcs.upload_bytes = MagicMock(return_value=_GCS_URL)
+        return gcs
+
+    @pytest.fixture
+    def mock_redis(self):
+        redis = MagicMock()
+        redis.get = AsyncMock(return_value=None)
+        redis.setex = AsyncMock()
+        return redis
+
+    @pytest.mark.asyncio
+    async def test_returns_rendered_preview(self, mock_pg_images, mock_gcs, mock_redis):
+        fake_png = b"\x89PNG" + b"\x00" * 100
+        with (
+            patch("app.styling.tools.fetch_and_resize", new=AsyncMock(return_value=b"\xff\xd8" + b"\x00" * 50)),
+            patch("app.styling.compositor.build_composite", new=AsyncMock(return_value=fake_png)),
+        ):
+            result = await render_outfit_preview(
+                ["p1", "p2"],
+                pg=mock_pg_images,
+                gcs=mock_gcs,
+                redis=mock_redis,
+            )
+        assert isinstance(result, RenderedPreview)
+        assert result.image_url == _GCS_URL
+        assert result.image_bytes == fake_png
+
+    @pytest.mark.asyncio
+    async def test_uses_cache_on_second_call(self, mock_pg_images, mock_gcs, mock_redis):
+        import json
+        cached_url = "https://cached.example.com/img.png"
+        cached_data = json.dumps({"image_url": cached_url, "layout_notes": "cached", "partial": False})
+        mock_redis.get = AsyncMock(return_value=cached_data)
+        fake_png = b"\x89PNG" + b"\x00" * 100
+
+        result = await render_outfit_preview(
+            ["p1", "p2"],
+            pg=mock_pg_images,
+            gcs=mock_gcs,
+            redis=mock_redis,
+            cached_image_bytes=fake_png,
+        )
+        assert result.image_url == cached_url
+
+    @pytest.mark.asyncio
+    async def test_partial_result_when_composite_fails(self, mock_pg_images, mock_gcs, mock_redis):
+        with (
+            patch("app.styling.tools.fetch_and_resize", new=AsyncMock(return_value=None)),
+            patch("app.styling.compositor.build_composite", new=AsyncMock(return_value=None)),
+        ):
+            result = await render_outfit_preview(
+                ["p1", "p2"],
+                pg=mock_pg_images,
+                gcs=mock_gcs,
+                redis=mock_redis,
+            )
+        assert result.partial is True
+        assert result.image_url == ""
+
+
+class TestCheckCompatibilityWithVision:
+    def _make_pg(self, rows):
+        pg = MagicMock()
+        pg.fetch_all = AsyncMock(return_value=rows)
+        return pg
+
+    def _make_anthropic(self, text="These work together beautifully."):
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(type="text", text=text)]
+        client.messages = MagicMock()
+        client.messages.create = AsyncMock(return_value=msg)
+        return client
+
+    def _default_rows(self):
+        return [
+            {"product_id": "p1", "title": "Black Dress", "description": "black midi dress", "subcategory": "Dresses", "price": 120.0},
+            {"product_id": "p2", "title": "Black Heels", "description": "black heeled sandals", "subcategory": "Heeled Sandals", "price": 85.0},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_includes_composite_url_in_report(self):
+        mock_preview = MagicMock()
+        mock_preview.image_url = _GCS_URL
+        mock_preview.image_bytes = b"\x89PNG" + b"\x00" * 100
+        mock_preview.partial = False
+
+        gcs = MagicMock()
+        redis = MagicMock()
+        redis.get = AsyncMock(return_value=None)
+        redis.setex = AsyncMock()
+
+        with patch("app.styling.tools.render_outfit_preview", new=AsyncMock(return_value=mock_preview)):
+            result = await check_compatibility(
+                ["p1", "p2"],
+                pg=self._make_pg(self._default_rows()),
+                anthropic_client=self._make_anthropic(),
+                gcs=gcs,
+                redis=redis,
+            )
+        assert result.preview_image_url == _GCS_URL
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_text_only_when_composite_fails(self):
+        mock_preview = MagicMock()
+        mock_preview.image_url = ""
+        mock_preview.image_bytes = b""
+        mock_preview.partial = True
+
+        gcs = MagicMock()
+        redis = MagicMock()
+        redis.get = AsyncMock(return_value=None)
+        redis.setex = AsyncMock()
+
+        with patch("app.styling.tools.render_outfit_preview", new=AsyncMock(return_value=mock_preview)):
+            result = await check_compatibility(
+                ["p1", "p2"],
+                pg=self._make_pg(self._default_rows()),
+                anthropic_client=self._make_anthropic("These work together."),
+                gcs=gcs,
+                redis=redis,
+            )
+        assert not result.preview_image_url
+        assert result.rationale != ""

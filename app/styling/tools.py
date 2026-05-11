@@ -2,12 +2,14 @@
 Styling tools — deterministic functions the agent drives.
 Dependencies (pg, anthropic_client, embedding_service) are injected via keyword args.
 """
+import hashlib
 import json
 import logging
 import statistics
+import uuid
 from typing import TYPE_CHECKING
 
-from .schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit
+from .schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit, RenderedPreview
 from .anthropic_client import CHEAP_MODEL
 from .slot_mapper import SLOT_MAP, VALID_SLOTS, subcategory_to_slot
 from .palette import extract_colours, colour_overlap
@@ -16,6 +18,7 @@ from .image_utils import fetch_and_resize
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
     from app.connectors.postgres import AsyncPostgresClient
+    from app.connectors.gcs import GCSClient
     from app.ranker.search import EmbeddingService
 
 logger = logging.getLogger(__name__)
@@ -252,8 +255,19 @@ async def check_compatibility(
     *,
     pg: "AsyncPostgresClient",
     anthropic_client: "AsyncAnthropic",
+    gcs: "GCSClient | None" = None,
+    redis=None,
+    preview_image_url: str | None = None,
+    preview_image_bytes: bytes | None = None,
 ) -> CompatibilityReport:
-    """Evaluate outfit coherence across palette, style, and price dimensions."""
+    """Evaluate outfit coherence across palette, style, and price dimensions.
+
+    When gcs + redis are provided, renders a composite internally if no preview
+    is passed. Agent should call render_outfit_preview first and pass the result
+    through; the internal render path is a slow fallback.
+    """
+    import base64
+
     if len(product_ids) < 2:
         raise ValueError("check_compatibility requires at least 2 products")
 
@@ -289,15 +303,46 @@ async def check_compatibility(
 
     score = 0.4 * palette_overlap_val + 0.35 * style_compat + 0.25 * price_coh
 
+    # Render composite if gcs/redis available and no preview passed in
+    preview_partial = True
+    if preview_image_bytes is None and gcs is not None and redis is not None:
+        logger.warning("check_compatibility called without preview — rendering internally (slow path)")
+        preview = await render_outfit_preview(product_ids, pg=pg, gcs=gcs, redis=redis)
+        preview_image_url = preview.image_url or None
+        preview_image_bytes = preview.image_bytes if not preview.partial else None
+        preview_partial = preview.partial
+    elif preview_image_bytes is not None:
+        preview_partial = not preview_image_bytes
+
     item_descriptions = "\n".join(
         f"- {r.get('title', '?')} ({r.get('subcategory', '?')}, £{r.get('price', 0):.0f})"
         for r in rows
     )
+    text_block = {
+        "type": "text",
+        "text": (
+            f"Outfit items:\n{item_descriptions}\n\n"
+            f"Palette overlap: {palette_overlap_val:.2f}, "
+            f"Style compatibility: {style_compat:.2f}, "
+            f"Price coherence: {price_coh:.2f}"
+        ),
+    }
+    content_blocks: list = [text_block]
+    if preview_image_bytes and not preview_partial:
+        content_blocks.insert(0, {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.b64encode(preview_image_bytes).decode(),
+            },
+        })
+
     msg = await anthropic_client.messages.create(
         model=CHEAP_MODEL,
-        max_tokens=100,
+        max_tokens=150,
         system=_COMPAT_SYSTEM,
-        messages=[{"role": "user", "content": f"Outfit items:\n{item_descriptions}"}],
+        messages=[{"role": "user", "content": content_blocks}],
     )
     rationale = msg.content[0].text.strip()
 
@@ -308,6 +353,85 @@ async def check_compatibility(
         price_coherence=round(price_coh, 3),
         rationale=rationale,
         compatible=score >= 0.5,
+        preview_image_url=preview_image_url if not preview_partial else None,
+    )
+
+
+COMPOSITE_CACHE_TTL = 3600  # 1 hour
+
+
+async def render_outfit_preview(
+    product_ids: list[str],
+    *,
+    pg: "AsyncPostgresClient",
+    gcs: "GCSClient",
+    redis,
+    cached_image_bytes: bytes | None = None,
+) -> RenderedPreview:
+    """Render a flat-lay composite of outfit items. Caches by product set in Redis."""
+    from .compositor import build_composite
+
+    cache_key = f"composite:{hashlib.sha256(','.join(sorted(product_ids)).encode()).hexdigest()}"
+    cached = await redis.get(cache_key)
+    if cached and cached_image_bytes is not None:
+        data = json.loads(cached)
+        return RenderedPreview(
+            image_bytes=cached_image_bytes,
+            image_url=data["image_url"],
+            layout_notes=data.get("layout_notes", ""),
+            partial=data.get("partial", False),
+        )
+
+    # Fetch primary image URL and subcategory for each product
+    image_rows = await pg.fetch_all(
+        """
+        SELECT p.product_id, pi.image_url
+        FROM catalog.products p
+        LEFT JOIN LATERAL (
+            SELECT image_url FROM catalog.product_images
+            WHERE product_id = p.product_id AND has_text_overlay IS DISTINCT FROM TRUE
+            ORDER BY position LIMIT 1
+        ) pi ON TRUE
+        WHERE p.product_id = ANY($1::text[])
+        """,
+        [product_ids],
+    )
+    url_by_id = {r["product_id"]: r.get("image_url") for r in image_rows}
+
+    slot_rows = await pg.fetch_all(
+        "SELECT product_id, subcategory FROM catalog.products WHERE product_id = ANY($1::text[])",
+        [product_ids],
+    )
+    slot_by_id = {
+        r["product_id"]: subcategory_to_slot(r.get("subcategory") or "") or "accessory"
+        for r in slot_rows
+    }
+
+    items_for_composite = []
+    for pid in product_ids:
+        url = url_by_id.get(pid)
+        img_bytes = await fetch_and_resize(url) if url else None
+        items_for_composite.append({"slot": slot_by_id.get(pid, "accessory"), "image_bytes": img_bytes})
+
+    composite_bytes = await build_composite(items_for_composite)
+    partial = composite_bytes is None
+
+    image_url = ""
+    if composite_bytes:
+        blob_name = f"styling/composites/{uuid.uuid4()}.png"
+        image_url = gcs.upload_bytes(None, blob_name, composite_bytes, "image/png")
+
+    await redis.setex(
+        cache_key,
+        COMPOSITE_CACHE_TTL,
+        json.dumps({"image_url": image_url, "layout_notes": "slot-based flat-lay", "partial": partial}),
+    )
+
+    return RenderedPreview(
+        image_bytes=composite_bytes or b"",
+        image_url=image_url,
+        layout_notes="slot-based flat-lay, v1",
+        partial=partial,
     )
 
 
