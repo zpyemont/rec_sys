@@ -1059,6 +1059,19 @@ async def style(request: StylingStyleRequest):
     anthropic_client = get_anthropic_client()
     embedding_service = EmbeddingService(settings.embedding_service_url)
 
+    if request.stream:
+        async def event_stream():
+            async for event in run_styling_agent(
+                request=request,
+                pg=async_pg,
+                anthropic_client=anthropic_client,
+                embedding_service=embedding_service,
+                redis=async_redis,
+            ):
+                yield f"event: {event.get('type', 'status')}\ndata: {_json.dumps(event)}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     async for event in run_styling_agent(
         request=request,
         pg=async_pg,
