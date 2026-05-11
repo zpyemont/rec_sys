@@ -1044,7 +1044,9 @@ async def search(
     )
 
 
-from .styling.schemas import StyleRequest as StylingStyleRequest
+from .styling.schemas import StyleRequest as StylingStyleRequest, SwapRequest, SwapResponse
+import json as _json
+from fastapi.responses import StreamingResponse
 
 
 @app.post("/style")
@@ -1068,6 +1070,48 @@ async def style(request: StylingStyleRequest):
             return event
 
     raise HTTPException(status_code=500, detail="Agent did not produce a final response")
+
+
+@app.post("/style/swap", response_model=SwapResponse)
+async def style_swap(request: SwapRequest):
+    from .styling.tools import search_products as _search_products
+    from .styling.schemas import OutfitItem
+    from .styling.anthropic_client import get_anthropic_client
+
+    async_pg = AsyncPostgresClient.from_settings(settings)
+    async_redis = get_async_redis_client(settings)
+    embedding_service = EmbeddingService(settings.embedding_service_url)
+
+    existing_ids = {item.product_id for item in request.outfit.items}
+    description = f"{request.original_prompt} — vary the {request.slot_to_swap}, different from current pick"
+    budget_per_slot = (request.outfit.total_price_gbp / max(len(request.outfit.items), 1)) * 1.2
+
+    candidates = await _search_products(
+        slot=request.slot_to_swap,
+        description=description,
+        max_price_gbp=budget_per_slot if budget_per_slot > 0 else None,
+        k=10,
+        pg=async_pg,
+        embedding_service=embedding_service,
+    )
+
+    replacement = next((c for c in candidates if c.product_id not in existing_ids), None)
+    if replacement is None:
+        raise HTTPException(status_code=404, detail=f"No alternative found for slot '{request.slot_to_swap}'")
+
+    new_item = OutfitItem(
+        slot=replacement.slot,
+        product_id=replacement.product_id,
+        title=replacement.title,
+        price_gbp=replacement.price_gbp,
+        image_url="",
+        affiliate_url="",
+        match_reason=f"Alternative {replacement.slot} option",
+    )
+    other_items = [i for i in request.outfit.items if i.slot != request.slot_to_swap]
+    new_total = sum(i.price_gbp for i in other_items) + replacement.price_gbp
+
+    return SwapResponse(new_item=new_item, total_price_gbp=new_total)
 
 
 @app.post("/track", response_model=TrackResponse)

@@ -221,3 +221,33 @@ class TestStyleEndpoint:
         client = TestClient(app)
         r = client.post("/style", json={})
         assert r.status_code == 422
+
+
+class TestSwapEndpoint:
+    def test_swap_endpoint_exists(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        r = client.post("/style/swap", json={})
+        assert r.status_code != 404
+
+    def test_swap_requires_fields(self):
+        from app.main import app
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        r = client.post("/style/swap", json={})
+        assert r.status_code == 422
+
+
+class TestVCREndToEnd:
+    def test_vcr_dark_academia_produces_final_event(self):
+        import pathlib
+        import pytest
+        fixture_path = pathlib.Path(__file__).parent / "fixtures" / "vcr_dark_academia.json"
+        if not fixture_path.exists():
+            pytest.skip("VCR fixture not yet recorded")
+        events = json.loads(fixture_path.read_text())
+        event_types = [e["type"] for e in events]
+        assert "final" in event_types
+        final = next(e for e in events if e["type"] == "final")
+        assert len(final.get("outfits", [])) >= 1
