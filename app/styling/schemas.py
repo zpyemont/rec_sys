@@ -75,6 +75,7 @@ class CandidateOutfit(BaseModel):
     items: list[OutfitItem]
     rationale: str
     total_price_gbp: float
+    preview_image_url: str | None = None
 
 
 class TraceStep(BaseModel):

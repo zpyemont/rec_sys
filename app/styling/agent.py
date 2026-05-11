@@ -249,6 +249,8 @@ async def run_styling_agent(
     tool_call_count = 0
     final_outfits: list[CandidateOutfit] = []
     brief_interpretation = ""
+    # Maps frozenset of product_ids → composite preview URL, populated by render_outfit_preview
+    _preview_url_cache: dict[frozenset, str] = {}
 
     yield {"type": "status", "phase": "reading_vibe", "message": "Reading the vibe...", "request_id": request_id}
 
@@ -263,200 +265,211 @@ async def run_styling_agent(
     messages: list[dict] = [{"role": "user", "content": request.prompt}]
     done = False
 
-    while not done and tool_call_count < HARD_CAP:
-        if tool_call_count >= SOFT_WARN:
-            logger.warning(
-                "request_id=%s tool_calls=%d — agent may be thrashing",
-                request_id, tool_call_count,
+    try:
+        while not done and tool_call_count < HARD_CAP:
+            if tool_call_count >= SOFT_WARN:
+                logger.warning(
+                    "request_id=%s tool_calls=%d — agent may be thrashing",
+                    request_id, tool_call_count,
+                )
+
+            response = await anthropic_client.messages.create(
+                model=AGENT_MODEL,
+                max_tokens=2048,
+                system=system,
+                tools=_TOOL_DEFS,
+                messages=messages,
             )
 
-        response = await anthropic_client.messages.create(
-            model=AGENT_MODEL,
-            max_tokens=2048,
-            system=system,
-            tools=_TOOL_DEFS,
-            messages=messages,
-        )
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
-        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-
-        if not tool_use_blocks:
-            done = True
-            break
-
-        messages.append({"role": "assistant", "content": response.content})
-
-        tool_results = []
-        for block in tool_use_blocks:
-            if tool_call_count >= HARD_CAP:
+            if not tool_use_blocks:
+                done = True
                 break
 
-            tool_name = block.name
-            args = block.input
-            tool_call_count += 1
-            step_num = tool_call_count
+            messages.append({"role": "assistant", "content": response.content})
 
-            yield {
-                "type": "tool_call_start",
-                "step": step_num,
-                "tool": tool_name,
-                "args": args,
-                "human": _human_for_tool_start(tool_name, args),
-            }
+            tool_results = []
+            for block in tool_use_blocks:
+                if tool_call_count >= HARD_CAP:
+                    break
 
-            result_content: str | list = ""
-            result_summary = ""
+                tool_name = block.name
+                args = block.input
+                tool_call_count += 1
+                step_num = tool_call_count
 
-            try:
-                if tool_name == "finalise":
-                    raw_outfits = args.get("outfits", [])
-                    for raw in raw_outfits:
-                        items = [OutfitItem(**item) for item in raw.get("items", [])]
-                        outfit = CandidateOutfit(
-                            outfit_id=raw.get("outfit_id", str(uuid.uuid4())),
-                            items=items,
-                            rationale=raw.get("rationale", ""),
-                            total_price_gbp=float(raw.get("total_price_gbp", 0)),
+                yield {
+                    "type": "tool_call_start",
+                    "step": step_num,
+                    "tool": tool_name,
+                    "args": args,
+                    "human": _human_for_tool_start(tool_name, args),
+                }
+
+                result_content: str | list = ""
+                result_summary = ""
+
+                try:
+                    if tool_name == "finalise":
+                        raw_outfits = args.get("outfits", [])
+                        for raw in raw_outfits:
+                            items = [OutfitItem(**item) for item in raw.get("items", [])]
+                            item_ids = frozenset(i.product_id for i in items)
+                            preview_url = _preview_url_cache.get(item_ids)
+                            outfit = CandidateOutfit(
+                                outfit_id=raw.get("outfit_id", str(uuid.uuid4())),
+                                items=items,
+                                rationale=raw.get("rationale", ""),
+                                total_price_gbp=float(raw.get("total_price_gbp", 0)),
+                                preview_image_url=preview_url,
+                            )
+                            final_outfits.append(outfit)
+                            yield {
+                                "type": "outfit_candidate",
+                                "outfit_id": outfit.outfit_id,
+                                "items": [i.model_dump() for i in outfit.items],
+                                "rationale": outfit.rationale,
+                                "preview_image_url": preview_url,
+                            }
+                        result_content = "Outfits submitted."
+                        result_summary = f"Submitted {len(raw_outfits)} outfit(s)."
+                        done = True
+
+                    elif tool_name == "generate_brief":
+                        cache_key = f"brief:{hashlib.sha256(args['prompt'].encode()).hexdigest()}"
+                        cached = await redis.get(cache_key)
+                        if cached:
+                            brief_data = json.loads(cached)
+                            brief_interpretation = brief_data.get("interpretation", "")
+                            result_summary = f"Brief (cached): {brief_interpretation}"
+                            result_content = json.dumps(brief_data)
+                        else:
+                            brief = await generate_brief(args["prompt"], anthropic_client=anthropic_client)
+                            await redis.setex(cache_key, BRIEF_CACHE_TTL, brief.model_dump_json())
+                            brief_interpretation = brief.interpretation
+                            result_summary = f"Brief: {brief.interpretation}"
+                            result_content = brief.model_dump_json()
+                            yield {
+                                "type": "status",
+                                "phase": "brief_done",
+                                "message": brief.interpretation,
+                                "brief": brief.model_dump(),
+                            }
+
+                    elif tool_name == "search_products":
+                        products = await search_products(
+                            slot=args["slot"],
+                            description=args["description"],
+                            reference_product_ids=args.get("reference_product_ids"),
+                            max_price_gbp=args.get("max_price_gbp"),
+                            k=args.get("k", 10),
+                            pg=pg,
+                            embedding_service=embedding_service,
                         )
-                        final_outfits.append(outfit)
-                        yield {
-                            "type": "outfit_candidate",
-                            "outfit_id": outfit.outfit_id,
-                            "items": [i.model_dump() for i in outfit.items],
-                            "rationale": outfit.rationale,
-                        }
-                    result_content = "Outfits submitted."
-                    result_summary = f"Submitted {len(raw_outfits)} outfit(s)."
-                    done = True
+                        result_summary = f"Found {len(products)} {args['slot']} candidates"
+                        result_content = json.dumps([p.model_dump() for p in products])
 
-                elif tool_name == "generate_brief":
-                    cache_key = f"brief:{hashlib.sha256(args['prompt'].encode()).hexdigest()}"
-                    cached = await redis.get(cache_key)
-                    if cached:
-                        brief_data = json.loads(cached)
-                        brief_interpretation = brief_data.get("interpretation", "")
-                        result_summary = f"Brief (cached): {brief_interpretation}"
-                        result_content = json.dumps(brief_data)
-                    else:
-                        brief = await generate_brief(args["prompt"], anthropic_client=anthropic_client)
-                        await redis.setex(cache_key, BRIEF_CACHE_TTL, brief.model_dump_json())
-                        brief_interpretation = brief.interpretation
-                        result_summary = f"Brief: {brief.interpretation}"
-                        result_content = brief.model_dump_json()
-                        yield {
-                            "type": "status",
-                            "phase": "brief_done",
-                            "message": brief.interpretation,
-                            "brief": brief.model_dump(),
-                        }
-
-                elif tool_name == "search_products":
-                    products = await search_products(
-                        slot=args["slot"],
-                        description=args["description"],
-                        reference_product_ids=args.get("reference_product_ids"),
-                        max_price_gbp=args.get("max_price_gbp"),
-                        k=args.get("k", 10),
-                        pg=pg,
-                        embedding_service=embedding_service,
-                    )
-                    result_summary = f"Found {len(products)} {args['slot']} candidates"
-                    result_content = json.dumps([p.model_dump() for p in products])
-
-                elif tool_name == "inspect_product":
-                    detail = await inspect_product(args["product_id"], pg=pg)
-                    result_summary = f"Inspected: {detail.title}"
-                    text_block = {"type": "text", "text": detail.model_dump_json(exclude={"image_bytes"})}
-                    if detail.image_bytes and detail.image_available:
-                        result_content = [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/jpeg",
-                                    "data": base64.b64encode(detail.image_bytes).decode(),
+                    elif tool_name == "inspect_product":
+                        detail = await inspect_product(args["product_id"], pg=pg)
+                        result_summary = f"Inspected: {detail.title}"
+                        text_block = {"type": "text", "text": detail.model_dump_json(exclude={"image_bytes"})}
+                        if detail.image_bytes and detail.image_available:
+                            result_content = [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/jpeg",
+                                        "data": base64.b64encode(detail.image_bytes).decode(),
+                                    },
                                 },
-                            },
-                            text_block,
-                        ]
-                    else:
-                        result_content = text_block["text"]
+                                text_block,
+                            ]
+                        else:
+                            result_content = text_block["text"]
 
-                elif tool_name == "render_outfit_preview":
-                    if gcs is not None:
-                        preview = await render_outfit_preview(
+                    elif tool_name == "render_outfit_preview":
+                        if gcs is not None:
+                            preview = await render_outfit_preview(
+                                args["product_ids"],
+                                pg=pg,
+                                gcs=gcs,
+                                redis=redis,
+                            )
+                            result_summary = f"Rendered composite — {'partial' if preview.partial else 'complete'}"
+                            tool_result_content: list = [{"type": "text", "text": json.dumps({
+                                "image_url": preview.image_url,
+                                "partial": preview.partial,
+                                "layout_notes": preview.layout_notes,
+                            })}]
+                            if not preview.partial and preview.image_bytes:
+                                tool_result_content.insert(0, {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": base64.b64encode(preview.image_bytes).decode(),
+                                    },
+                                })
+                            result_content = tool_result_content
+                            if preview.image_url and not preview.partial:
+                                _preview_url_cache[frozenset(args["product_ids"])] = preview.image_url
+                        else:
+                            result_content = json.dumps({"image_url": None, "partial": True, "layout_notes": "gcs not configured"})
+                            result_summary = "render_outfit_preview skipped (gcs not configured)"
+
+                    elif tool_name == "check_compatibility":
+                        report = await check_compatibility(
                             args["product_ids"],
                             pg=pg,
+                            anthropic_client=anthropic_client,
                             gcs=gcs,
                             redis=redis,
+                            preview_image_url=args.get("preview_image_url"),
                         )
-                        result_summary = f"Rendered composite — {'partial' if preview.partial else 'complete'}"
-                        tool_result_content: list = [{"type": "text", "text": json.dumps({
-                            "image_url": preview.image_url,
-                            "partial": preview.partial,
-                            "layout_notes": preview.layout_notes,
-                        })}]
-                        if not preview.partial and preview.image_bytes:
-                            tool_result_content.insert(0, {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": base64.b64encode(preview.image_bytes).decode(),
-                                },
-                            })
-                        result_content = tool_result_content
+                        result_summary = f"Compatibility: {report.score:.2f} — {report.rationale[:80]}"
+                        result_content = report.model_dump_json()
+
                     else:
-                        result_content = json.dumps({"image_url": None, "partial": True, "layout_notes": "gcs not configured"})
-                        result_summary = "render_outfit_preview skipped (gcs not configured)"
+                        result_content = f"Unknown tool: {tool_name}"
+                        result_summary = result_content
 
-                elif tool_name == "check_compatibility":
-                    report = await check_compatibility(
-                        args["product_ids"],
-                        pg=pg,
-                        anthropic_client=anthropic_client,
-                        gcs=gcs,
-                        redis=redis,
-                        preview_image_url=args.get("preview_image_url"),
-                    )
-                    result_summary = f"Compatibility: {report.score:.2f} — {report.rationale[:80]}"
-                    result_content = report.model_dump_json()
+                except Exception as exc:
+                    logger.exception("Tool %s failed: %s", tool_name, exc)
+                    result_content = f"Error: {exc}"
+                    result_summary = f"{tool_name} failed: {exc}"
 
-                else:
-                    result_content = f"Unknown tool: {tool_name}"
-                    result_summary = result_content
+                trace.append(TraceStep(
+                    step=step_num,
+                    tool=tool_name,
+                    args=args,
+                    result_summary=result_summary,
+                ))
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_content,
+                })
 
-            except Exception as exc:
-                logger.exception("Tool %s failed: %s", tool_name, exc)
-                result_content = f"Error: {exc}"
-                result_summary = f"{tool_name} failed: {exc}"
+                yield {
+                    "type": "tool_call_end",
+                    "step": step_num,
+                    "tool": tool_name,
+                    "result_summary": result_summary,
+                    "human": _human_for_tool_end(tool_name, result_summary),
+                }
 
-            trace.append(TraceStep(
-                step=step_num,
-                tool=tool_name,
-                args=args,
-                result_summary=result_summary,
-            ))
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result_content,
-            })
+                if done:
+                    break
 
-            yield {
-                "type": "tool_call_end",
-                "step": step_num,
-                "tool": tool_name,
-                "result_summary": result_summary,
-                "human": _human_for_tool_end(tool_name, result_summary),
-            }
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+                _strip_images_from_history(messages)
 
-            if done:
-                break
-
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
-            _strip_images_from_history(messages)
+    except Exception as exc:
+        logger.exception("request_id=%s agent loop fatal error: %s", request_id, exc)
+        yield {"type": "error", "code": "agent_error", "message": str(exc)}
 
     if tool_call_count >= HARD_CAP and not done:
         logger.error(

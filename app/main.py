@@ -1053,11 +1053,13 @@ from fastapi.responses import StreamingResponse
 async def style(request: StylingStyleRequest):
     from .styling.agent import run_styling_agent
     from .styling.anthropic_client import get_anthropic_client
+    from .connectors.gcs import GCSClient
 
     async_pg = AsyncPostgresClient.from_settings(settings)
     async_redis = get_async_redis_client(settings)
     anthropic_client = get_anthropic_client()
     embedding_service = EmbeddingService(settings.embedding_service_url)
+    gcs = GCSClient(settings)
 
     if request.stream:
         async def event_stream():
@@ -1067,6 +1069,7 @@ async def style(request: StylingStyleRequest):
                 anthropic_client=anthropic_client,
                 embedding_service=embedding_service,
                 redis=async_redis,
+                gcs=gcs,
             ):
                 yield f"event: {event.get('type', 'status')}\ndata: {_json.dumps(event)}\n\n"
 
@@ -1078,21 +1081,22 @@ async def style(request: StylingStyleRequest):
         anthropic_client=anthropic_client,
         embedding_service=embedding_service,
         redis=async_redis,
+        gcs=gcs,
     ):
         if event.get("type") == "final":
             return event
+        if event.get("type") == "error":
+            raise HTTPException(status_code=500, detail=event.get("message", "Styling failed"))
 
     raise HTTPException(status_code=500, detail="Agent did not produce a final response")
 
 
 @app.post("/style/swap", response_model=SwapResponse)
 async def style_swap(request: SwapRequest):
-    from .styling.tools import search_products as _search_products
+    from .styling.tools import search_products as _search_products, inspect_product as _inspect_product
     from .styling.schemas import OutfitItem
-    from .styling.anthropic_client import get_anthropic_client
 
     async_pg = AsyncPostgresClient.from_settings(settings)
-    async_redis = get_async_redis_client(settings)
     embedding_service = EmbeddingService(settings.embedding_service_url)
 
     existing_ids = {item.product_id for item in request.outfit.items}
@@ -1112,13 +1116,14 @@ async def style_swap(request: SwapRequest):
     if replacement is None:
         raise HTTPException(status_code=404, detail=f"No alternative found for slot '{request.slot_to_swap}'")
 
+    detail = await _inspect_product(replacement.product_id, pg=async_pg)
     new_item = OutfitItem(
         slot=replacement.slot,
         product_id=replacement.product_id,
         title=replacement.title,
         price_gbp=replacement.price_gbp,
-        image_url="",
-        affiliate_url="",
+        image_url=detail.images[0] if detail.images else "",
+        affiliate_url=detail.affiliate_url,
         match_reason=f"Alternative {replacement.slot} option",
     )
     other_items = [i for i in request.outfit.items if i.slot != request.slot_to_swap]

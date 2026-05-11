@@ -85,6 +85,7 @@ async def search_products(
     # averaging is valid (Option 1 from spec).
     clip_emb = image_emb  # 512-dim CLIP text-to-image embedding
 
+    ref_averaged = False
     if reference_product_ids and clip_emb is not None:
         ref_rows = await pg.fetch_all(
             "SELECT image_embedding FROM embeddings.product_vectors "
@@ -97,10 +98,11 @@ async def search_products(
             averaged = all_vecs.mean(axis=0)
             norm = np.linalg.norm(averaged)
             clip_emb = (averaged / norm).tolist() if norm > 0 else clip_emb
+            ref_averaged = True
 
-    # When using reference images, search CLIP image space; otherwise use
-    # the higher-quality Marqo text embedding for semantic matching.
-    if reference_product_ids and clip_emb is not None:
+    # When reference images were averaged in, search CLIP image space.
+    # Otherwise use the higher-quality Marqo text embedding for semantic matching.
+    if ref_averaged and clip_emb is not None:
         embedding = clip_emb
         emb_col = "image_embedding"
     else:
@@ -300,16 +302,20 @@ async def check_compatibility(
 
     score = 0.4 * palette_overlap_val + 0.35 * style_compat + 0.25 * price_coh
 
-    # Render composite if gcs/redis available and no preview passed in
+    # Render composite if gcs/redis available and no preview passed in.
+    # If preview_image_url was already provided (agent called render_outfit_preview
+    # first), skip re-render and mark as not partial so the URL is included in response.
     preview_partial = True
-    if preview_image_bytes is None and gcs is not None and redis is not None:
+    if preview_image_url is not None:
+        preview_partial = False
+    elif preview_image_bytes is None and gcs is not None and redis is not None:
         logger.warning("check_compatibility called without preview — rendering internally (slow path)")
         preview = await render_outfit_preview(product_ids, pg=pg, gcs=gcs, redis=redis)
         preview_image_url = preview.image_url or None
         preview_image_bytes = preview.image_bytes if not preview.partial else None
         preview_partial = preview.partial
     elif preview_image_bytes is not None:
-        preview_partial = not preview_image_bytes
+        preview_partial = len(preview_image_bytes) == 0
 
     item_descriptions = "\n".join(
         f"- {r.get('title', '?')} ({r.get('subcategory', '?')}, £{r.get('price', 0):.0f})"
