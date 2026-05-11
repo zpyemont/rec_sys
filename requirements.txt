@@ -17,3 +17,4 @@ tensorflow-serving-api==2.11.1
 grpcio==1.59.0
 protobuf==3.19.6
 pyfarmhash==0.3.2
+anthropic>=0.40.0

@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     search_default_weights: tuple[float, float, float] = (1.0, 1.0, 1.0)  # text, image, keyword
     embedding_service_url: str = "http://parser:8080"  # Parser service URL for embeddings
 
+    # Styling / Vibe Translator
+    anthropic_api_key: str | None = None
+    gcs_bucket_composites: str = "looksy-outfit-composites"
+
 
 @lru_cache()
 def get_settings() -> Settings:
