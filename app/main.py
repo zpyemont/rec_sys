@@ -1044,6 +1044,32 @@ async def search(
     )
 
 
+from .styling.schemas import StyleRequest as StylingStyleRequest
+
+
+@app.post("/style")
+async def style(request: StylingStyleRequest):
+    from .styling.agent import run_styling_agent
+    from .styling.anthropic_client import get_anthropic_client
+
+    async_pg = AsyncPostgresClient.from_settings(settings)
+    async_redis = get_async_redis_client(settings)
+    anthropic_client = get_anthropic_client()
+    embedding_service = EmbeddingService(settings.embedding_service_url)
+
+    async for event in run_styling_agent(
+        request=request,
+        pg=async_pg,
+        anthropic_client=anthropic_client,
+        embedding_service=embedding_service,
+        redis=async_redis,
+    ):
+        if event.get("type") == "final":
+            return event
+
+    raise HTTPException(status_code=500, detail="Agent did not produce a final response")
+
+
 @app.post("/track", response_model=TrackResponse)
 def track_interaction(request: TrackRequest) -> TrackResponse:
     """

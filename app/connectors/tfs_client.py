@@ -4,8 +4,6 @@ TensorFlow Serving client for calling Monolith model predictions
 
 import grpc
 import numpy as np
-from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
-import tensorflow as tf
 from typing import Dict, List, Tuple
 import logging
 
@@ -26,6 +24,7 @@ class MonolithClient:
         self.port = port
         self.model_name = model_name
         self.timeout = timeout
+        from tensorflow_serving.apis import prediction_service_pb2_grpc
         self.channel = grpc.insecure_channel(f'{host}:{port}')
         self.stub = prediction_service_pb2_grpc.PredictionServiceStub(self.channel)
         logger.info(f"Monolith client initialized: {host}:{port}, model={model_name}")
@@ -51,6 +50,9 @@ class MonolithClient:
         Raises:
             grpc.RpcError: If prediction call fails
         """
+        import tensorflow as tf
+        from tensorflow_serving.apis import predict_pb2
+
         if not product_ids:
             logger.warning("Empty product_ids list provided")
             return np.zeros(128), {}, {}
@@ -108,6 +110,9 @@ class MonolithClient:
         Raises:
             grpc.RpcError: If prediction call fails
         """
+        import tensorflow as tf
+        from tensorflow_serving.apis import predict_pb2
+
         user_id_hash = self._hash_id(user_id)
 
         example = tf.train.Example()
@@ -150,6 +155,7 @@ class MonolithClient:
             128-dim numpy array
         """
         try:
+            import tensorflow as tf
             # User embedding should be shape (batch_size, 128)
             # We take the first one since all examples have the same user
             user_emb_array = tf.make_ndarray(result.outputs['user_embedding'])
@@ -174,6 +180,7 @@ class MonolithClient:
             Dict mapping product_id -> 128-dim embedding
         """
         try:
+            import tensorflow as tf
             # Product embeddings: shape (batch_size, 128)
             product_embs_array = tf.make_ndarray(result.outputs['product_embedding'])
 
@@ -198,6 +205,7 @@ class MonolithClient:
             Dict mapping product_id -> score
         """
         try:
+            import tensorflow as tf
             # Scores: shape (batch_size, 1) or (batch_size,)
             scores_array = tf.make_ndarray(result.outputs['score']).flatten()
 
