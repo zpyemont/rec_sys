@@ -18,3 +18,5 @@ grpcio==1.59.0
 protobuf==3.19.6
 pyfarmhash==0.3.2
 anthropic>=0.40.0
+Pillow>=10.0.0
+rembg>=2.0.0
