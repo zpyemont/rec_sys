@@ -4,6 +4,7 @@ Dependencies (pg, anthropic_client, embedding_service) are injected via keyword 
 """
 import json
 import logging
+import statistics
 from typing import TYPE_CHECKING
 
 from .schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit
@@ -162,3 +163,111 @@ async def inspect_product(product_id: str, *, pg: "AsyncPostgresClient") -> Prod
         slot=slot,
         subcategory=row.get("subcategory") or "",
     )
+
+
+# ---------------------------------------------------------------------------
+# Compatibility scoring helpers
+# ---------------------------------------------------------------------------
+
+def _palette_overlap_score(colours_a: list[str], colours_b: list[str]) -> float:
+    return colour_overlap(colours_a, colours_b)
+
+
+def _style_compatibility_score(subcat_a: str, subcat_b: str) -> float:
+    """1.0 if mutual adjacency, 0.5 if one-way, 0.0 if unrelated."""
+    from app.settings import get_settings
+    adj = get_settings().category_adjacency
+    a_adj = set(adj.get(subcat_a, []))
+    b_adj = set(adj.get(subcat_b, []))
+    if subcat_b in a_adj and subcat_a in b_adj:
+        return 1.0
+    if subcat_b in a_adj or subcat_a in b_adj:
+        return 0.5
+    return 0.0
+
+
+def _price_coherence_score(prices: list[float]) -> float:
+    """1 - CV (coefficient of variation), clamped to [0, 1]. Higher = more coherent."""
+    if len(prices) <= 1:
+        return 1.0
+    mean = statistics.mean(prices)
+    if mean == 0:
+        return 1.0
+    cv = statistics.stdev(prices) / mean
+    return max(0.0, 1.0 - cv)
+
+
+_COMPAT_SYSTEM = """
+You are a fashion stylist. Given a list of clothing items, write one short sentence
+explaining whether they work together as an outfit and why. Be specific about colour,
+silhouette, and occasion. Return only the sentence, no preamble.
+"""
+
+
+async def check_compatibility(
+    product_ids: list[str],
+    *,
+    pg: "AsyncPostgresClient",
+    anthropic_client: "AsyncAnthropic",
+) -> CompatibilityReport:
+    """Evaluate outfit coherence across palette, style, and price dimensions."""
+    if len(product_ids) < 2:
+        raise ValueError("check_compatibility requires at least 2 products")
+
+    rows = await pg.fetch_all(
+        """
+        SELECT p.product_id, p.title, p.description, p.subcategory, pp.price
+        FROM catalog.products p
+        JOIN catalog.product_pricing pp USING (product_id)
+        WHERE p.product_id = ANY($1::text[]) AND pp.is_active = TRUE
+        """,
+        [product_ids],
+    )
+
+    colours_per_item = [
+        extract_colours(f"{r.get('title', '')} {r.get('description', '')}") for r in rows
+    ]
+
+    palette_scores = []
+    for i in range(len(colours_per_item)):
+        for j in range(i + 1, len(colours_per_item)):
+            palette_scores.append(colour_overlap(colours_per_item[i], colours_per_item[j]))
+    palette_overlap_val = statistics.mean(palette_scores) if palette_scores else 0.0
+
+    subcats = [r.get("subcategory") or "" for r in rows]
+    style_scores = []
+    for i in range(len(subcats)):
+        for j in range(i + 1, len(subcats)):
+            style_scores.append(_style_compatibility_score(subcats[i], subcats[j]))
+    style_compat = statistics.mean(style_scores) if style_scores else 0.0
+
+    prices = [float(r.get("price") or 0) for r in rows]
+    price_coh = _price_coherence_score(prices)
+
+    score = 0.4 * palette_overlap_val + 0.35 * style_compat + 0.25 * price_coh
+
+    item_descriptions = "\n".join(
+        f"- {r.get('title', '?')} ({r.get('subcategory', '?')}, £{r.get('price', 0):.0f})"
+        for r in rows
+    )
+    msg = await anthropic_client.messages.create(
+        model=CHEAP_MODEL,
+        max_tokens=100,
+        system=_COMPAT_SYSTEM,
+        messages=[{"role": "user", "content": f"Outfit items:\n{item_descriptions}"}],
+    )
+    rationale = msg.content[0].text.strip()
+
+    return CompatibilityReport(
+        score=round(score, 3),
+        palette_overlap=round(palette_overlap_val, 3),
+        style_compatibility=round(style_compat, 3),
+        price_coherence=round(price_coh, 3),
+        rationale=rationale,
+        compatible=score >= 0.5,
+    )
+
+
+def finalise(outfits: list[CandidateOutfit]) -> None:
+    """Terminal action — signals the agent loop to stop."""
+    return None

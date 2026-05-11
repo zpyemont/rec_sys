@@ -1,8 +1,12 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from app.styling.tools import generate_brief, search_products, inspect_product
-from app.styling.schemas import OutfitBrief, ProductSummary, ProductDetail
+from app.styling.tools import (
+    generate_brief, search_products, inspect_product,
+    check_compatibility, finalise,
+    _palette_overlap_score, _style_compatibility_score, _price_coherence_score,
+)
+from app.styling.schemas import OutfitBrief, ProductSummary, ProductDetail, CompatibilityReport, CandidateOutfit
 
 
 def test_anthropic_client_importable():
@@ -156,3 +160,83 @@ class TestInspectProduct:
     async def test_palette_extracted_from_description(self, mock_pg_with_product):
         result = await inspect_product("domain:handle-1", pg=mock_pg_with_product)
         assert "champagne" in result.palette
+
+
+class TestCompatibilityScores:
+    def test_palette_overlap_same_colours(self):
+        assert _palette_overlap_score(["black", "ivory"], ["black", "ivory"]) == 1.0
+
+    def test_palette_overlap_no_colours(self):
+        assert _palette_overlap_score(["black"], ["white"]) == 0.0
+
+    def test_style_compatibility_adjacent(self):
+        score = _style_compatibility_score("Dresses", "Heeled Sandals")
+        assert score > 0.0
+
+    def test_style_compatibility_unrelated(self):
+        assert _style_compatibility_score("Dresses", "Basketball Shoes") == 0.0
+
+    def test_price_coherence_same_price(self):
+        assert _price_coherence_score([100.0, 100.0, 100.0]) == 1.0
+
+    def test_price_coherence_mixed_tiers(self):
+        assert _price_coherence_score([15.0, 500.0]) < 0.5
+
+    def test_price_coherence_single_item(self):
+        assert _price_coherence_score([100.0]) == 1.0
+
+
+class TestCheckCompatibility:
+    @pytest.fixture
+    def mock_pg_multi(self):
+        pg = MagicMock()
+        pg.fetch_all = AsyncMock(return_value=[
+            {"product_id": "p1", "title": "Black Midi Dress", "description": "black elegant midi dress", "subcategory": "Dresses", "price": 120.0},
+            {"product_id": "p2", "title": "Black Heeled Sandals", "description": "black strappy sandals", "subcategory": "Heeled Sandals", "price": 85.0},
+        ])
+        return pg
+
+    @pytest.fixture
+    def mock_anthropic_compat(self):
+        client = MagicMock()
+        msg = MagicMock()
+        msg.content = [MagicMock(type="text", text="These items work together: black palette creates coherence.")]
+        client.messages = MagicMock()
+        client.messages.create = AsyncMock(return_value=msg)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_returns_report(self, mock_pg_multi, mock_anthropic_compat):
+        result = await check_compatibility(
+            ["p1", "p2"],
+            pg=mock_pg_multi,
+            anthropic_client=mock_anthropic_compat,
+        )
+        assert isinstance(result, CompatibilityReport)
+        assert 0.0 <= result.score <= 1.0
+        assert result.rationale != ""
+
+    @pytest.mark.asyncio
+    async def test_compatible_palette(self, mock_pg_multi, mock_anthropic_compat):
+        result = await check_compatibility(
+            ["p1", "p2"],
+            pg=mock_pg_multi,
+            anthropic_client=mock_anthropic_compat,
+        )
+        assert result.palette_overlap > 0.5
+
+    @pytest.mark.asyncio
+    async def test_requires_at_least_two_products(self, mock_anthropic_compat):
+        pg = MagicMock()
+        pg.fetch_all = AsyncMock(return_value=[])
+        with pytest.raises(ValueError, match="at least 2"):
+            await check_compatibility(["p1"], pg=pg, anthropic_client=mock_anthropic_compat)
+
+
+class TestFinalise:
+    def test_returns_none(self):
+        assert finalise([]) is None
+
+    def test_accepts_candidate_outfits(self):
+        outfit = CandidateOutfit(outfit_id="o1", items=[], rationale="test", total_price_gbp=0.0)
+        assert finalise([outfit]) is None
